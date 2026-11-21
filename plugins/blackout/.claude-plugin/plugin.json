@@ -1,0 +1,19 @@
+{
+  "name": "blackout",
+  "version": "0.2.0",
+  "description": "Toggle with ctrl+space (or /blackout) to blank Claude Code's screen down to the terminal's own background, and back",
+  "author": {
+    "name": "Ryota Murakami",
+    "url": "https://github.com/ryota-murakami"
+  },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/blackout",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": [
+    "claude-code-mod",
+    "privacy",
+    "screen",
+    "keybinding"
+  ],
+  "types": "./types/index.d.ts"
+}

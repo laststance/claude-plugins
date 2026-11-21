@@ -1,0 +1,17 @@
+{
+  "name": "thinking-log",
+  "version": "0.1.0",
+  "description": "Shows Claude's streamed thinking summary as dim lines in the session transcript",
+  "author": {
+    "name": "Laststance.io",
+    "url": "https://github.com/laststance"
+  },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/thinking-log",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": [
+    "claude-code-mod",
+    "thinking",
+    "transcript"
+  ]
+}

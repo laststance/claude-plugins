@@ -9,6 +9,11 @@
   },
   "plugins": [
     {
+      "name": "blackout",
+      "source": "./plugins/blackout",
+      "description": "Toggle with ctrl+space (or /blackout) to blank Claude Code's screen down to the terminal's own background, and back"
+    },
+    {
       "name": "desktop-notification",
       "source": "./plugins/desktop-notification",
       "description": "macOS desktop notification when Claude Code needs you (waiting for input, a permission prompt); clicking it brings your terminal to the front"
@@ -22,6 +27,11 @@
       "name": "serena-activate",
       "source": "./plugins/serena-activate",
       "description": "Puts Serena's instructions manual and its already-active project into the system prompt, and its tools in front, so Claude uses Serena without being asked"
+    },
+    {
+      "name": "thinking-log",
+      "source": "./plugins/thinking-log",
+      "description": "Shows Claude's streamed thinking summary as dim lines in the session transcript"
     }
   ]
 }

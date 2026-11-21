@@ -1,0 +1,4 @@
+{
+  "description": "thinking-log: turn.step collects the main loop's thinking chunks and $.ui.log prints each block before the answer",
+  "modules": ["./register.ts"]
+}

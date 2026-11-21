@@ -6,9 +6,11 @@ Claude Code plugins and mods by [Laststance.io](https://github.com/laststance). 
 
 | Plugin | What it does | Commands |
 | --- | --- | --- |
+| [blackout](plugins/blackout) | Blanks Claude Code's screen down to the terminal background with one key, and back (Claude keeps working) | `/blackout` (`ctrl+space`) |
 | [desktop-notification](plugins/desktop-notification) | macOS notification when Claude Code needs you; a click brings your terminal forward | (hook) |
 | [open-in-editor](plugins/open-in-editor) | Opens the session's project root in your editor of choice (macOS) | `/vscode` `/cursor` `/devin-desktop` `/webstorm` `/phpstorm` `/zed` |
 | [serena-activate](plugins/serena-activate) | Briefs Claude on Serena in the system prompt and puts its tools in front, so it is used without being asked | (mod) |
+| [thinking-log](plugins/thinking-log) | Shows Claude's thinking as dim lines in the normal transcript, above what it led to | (mod) |
 
 ## Install
 
