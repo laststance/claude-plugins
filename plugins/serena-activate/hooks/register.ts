@@ -145,8 +145,9 @@ export const register: Register = (on, options) => {
     if (!lookup.hasReportedOutcome) {
       lookup.hasReportedOutcome = true
       const projectName = serenaProject.projectRoot.split('/').pop() || serenaProject.projectRoot
+      // A toast, not $.ui.status: the engine pins status lines under a ⚠ mark, which reads as a warning
       if (serenaProject.manualResult.isLoaded) {
-        $.ui.status(`Serena ✓ ${projectName}`)
+        $.ui.toast(`Serena ✓ ${projectName}`)
       } else {
         $.ui.toast(`serena-activate: ${serenaProject.manualResult.failure}`)
       }

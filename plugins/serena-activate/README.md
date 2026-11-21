@@ -10,7 +10,7 @@ Serena's own SessionStart hook (`serena-hooks activate`) only *asks* Claude to c
 
 - **Briefs Claude in the system prompt.** At session start it finds the project Serena activated (the nearest directory with `.serena/project.yml` or `.git`, the same rule as `--project-from-cwd`), reads Serena's instructions manual with `serena print-system-prompt`, and adds both as the system prompt's last section. Nothing depends on Claude calling a tool, and the section survives `/clear` and compaction.
 - **Puts Serena's tools in front.** Serena's tools are moved out from behind ToolSearch, so Claude can call them without loading them first (turn this off with the `loadTools` option).
-- **Shows it worked.** The status line reads `Serena ✓ <project>`; if the manual cannot be read, a toast says why and Claude is told to call `initial_instructions` instead.
+- **Shows it worked.** A toast reads `Serena ✓ <project>` once per session; if the manual cannot be read, the toast says why and Claude is told to call `initial_instructions` instead.
 
 Outside a project, or in a session without a Serena MCP server, it adds nothing.
 

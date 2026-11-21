@@ -13,7 +13,7 @@ describe('register', () => {
   test('inside a git project the system prompt ends with the Serena briefing and its manual', async ($, on) => {
     // Arrange
     const serenaRuns: (readonly string[])[] = []
-    const statusTexts: (string | undefined)[] = []
+    const toastTexts: string[] = []
     on('session.start', (_, e) => ({ cwd: e.cwd }))
     on('fs.exists', (_, e) => ({ value: e.path === '/Users/me/work/app/.git' }))
     on('env.get', () => ({ value: '/Users/me' }))
@@ -29,8 +29,8 @@ describe('register', () => {
         },
       }
     })
-    on('ui.status', (_, e) => {
-      statusTexts.push(e.text)
+    on('ui.toast', (_, e) => {
+      toastTexts.push(e.text)
       return { value: undefined }
     })
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
@@ -55,7 +55,7 @@ describe('register', () => {
     expect(serenaRuns).toEqual([
       ['serena', 'print-system-prompt', '--only-instructions', '--context', 'claude-code', '/Users/me/work/app'],
     ])
-    expect(statusTexts).toEqual(['Serena ✓ app'])
+    expect(toastTexts).toEqual(['Serena ✓ app'])
   })
 
   test('outside any project the system prompt stays as the engine composed it', async ($, on) => {
@@ -105,7 +105,7 @@ describe('register', () => {
         { name: 'mcp__serena__find_symbol', description: 'Finds symbols', mcp: true },
       ],
     }))
-    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
     await $.session.start({ cwd: '/Users/me/work/app', surface: 'terminal', isInteractive: true })
 
@@ -169,7 +169,7 @@ describe('register', () => {
     on('process.run', () => ({
       value: { exitCode: 0, stdout: '<serena>manual</serena>', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
     }))
-    on('ui.status', () => ({ value: undefined }))
+    on('ui.toast', () => ({ value: undefined }))
     on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
     await $.session.start({ cwd: '/Users/me/work/app', surface: 'terminal', isInteractive: true })
 
@@ -219,7 +219,7 @@ describe('register', () => {
       on('process.run', () => ({
         value: { exitCode: 0, stdout: '<serena>manual</serena>', stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
       }))
-      on('ui.status', () => ({ value: undefined }))
+      on('ui.toast', () => ({ value: undefined }))
       on('tool.describe', (_, e) => ({ tool: e.tool, description: e.description, isDeferred: true }))
       on('prompt.compose', () => ({ sections: [{ id: 'intro', text: 'You are Claude Code.', scope: 'shared' }] }))
       await $.session.start({ cwd: '/Users/me/work/app', surface: 'terminal', isInteractive: true })
