@@ -1,0 +1,10 @@
+{
+  "name": "desktop-notification",
+  "version": "0.1.0",
+  "description": "macOS desktop notification when Claude Code needs you (waiting for input, a permission prompt); clicking it brings your terminal to the front",
+  "author": { "name": "Laststance.io", "url": "https://github.com/laststance" },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/desktop-notification",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": ["notification", "macos", "terminal-notifier", "hooks"]
+}

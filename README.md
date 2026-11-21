@@ -6,7 +6,9 @@ Claude Code plugins and mods by [Laststance.io](https://github.com/laststance). 
 
 | Plugin | What it does | Commands |
 | --- | --- | --- |
+| [desktop-notification](plugins/desktop-notification) | macOS notification when Claude Code needs you; a click brings your terminal forward | (hook) |
 | [open-in-editor](plugins/open-in-editor) | Opens the session's project root in your editor of choice (macOS) | `/vscode` `/cursor` `/devin-desktop` `/webstorm` `/phpstorm` `/zed` |
+| [serena-activate](plugins/serena-activate) | Briefs Claude on Serena in the system prompt and puts its tools in front, so it is used without being asked | (mod) |
 
 ## Install
 

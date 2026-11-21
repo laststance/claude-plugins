@@ -1,14 +1,27 @@
 {
   "name": "laststance",
-  "owner": { "name": "Laststance.io", "url": "https://github.com/laststance" },
+  "owner": {
+    "name": "Laststance.io",
+    "url": "https://github.com/laststance"
+  },
   "metadata": {
     "description": "Claude Code plugins and mods by Laststance.io"
   },
   "plugins": [
     {
+      "name": "desktop-notification",
+      "source": "./plugins/desktop-notification",
+      "description": "macOS desktop notification when Claude Code needs you (waiting for input, a permission prompt); clicking it brings your terminal to the front"
+    },
+    {
       "name": "open-in-editor",
       "source": "./plugins/open-in-editor",
       "description": "/vscode /cursor /devin-desktop /webstorm /phpstorm /zed open the session's project root in that editor (macOS)"
+    },
+    {
+      "name": "serena-activate",
+      "source": "./plugins/serena-activate",
+      "description": "Puts Serena's instructions manual and its already-active project into the system prompt, and its tools in front, so Claude uses Serena without being asked"
     }
   ]
 }
