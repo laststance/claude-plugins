@@ -1,0 +1,4 @@
+{
+  "description": "secret-guard: tool.call refuses a shell command that spells out a secret and masks secrets in the result; session.append masks them in every other row the conversation keeps",
+  "modules": ["./register.ts"]
+}

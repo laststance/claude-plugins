@@ -3,3 +3,4 @@
 .claude-plugin/types/
 plugins/*/.claude-plugin/types/
 .serena/
+.claude/worktrees/

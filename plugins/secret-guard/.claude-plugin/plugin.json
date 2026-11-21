@@ -1,0 +1,39 @@
+{
+  "name": "secret-guard",
+  "version": "0.1.0",
+  "description": "Keeps secrets out of the conversation: refuses shell commands that spell out a key or token, and masks secrets in tool results before Claude and the transcript get them",
+  "author": {
+    "name": "Laststance.io",
+    "url": "https://github.com/laststance"
+  },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/secret-guard",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": [
+    "claude-code-mod",
+    "secrets",
+    "security",
+    "redaction",
+    "api-keys"
+  ],
+  "userConfig": {
+    "blockCommands": {
+      "type": "boolean",
+      "title": "Refuse shell commands that spell out a secret",
+      "description": "Refuse a Bash or PowerShell command that has a key or token written into it, so the value is read inside the command (an environment variable, a file, a password manager) instead",
+      "default": true
+    },
+    "maskOutput": {
+      "type": "boolean",
+      "title": "Mask secrets in tool results",
+      "description": "Replace keys, tokens and passwords in what a tool returns with ••• before Claude reads it and before it is written to the transcript",
+      "default": true
+    },
+    "notify": {
+      "type": "boolean",
+      "title": "Say when something was masked",
+      "description": "Print a dim line in the transcript each time a value was masked, naming its kind and never the value",
+      "default": true
+    }
+  }
+}
