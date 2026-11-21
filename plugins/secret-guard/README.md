@@ -51,7 +51,7 @@ What you type in your own prompt is left as it is: a key you write there is one 
 | Secret in an environment variable | `NAME=value` where the name ends in `TOKEN`, `SECRET`, `PASSWORD`, `API_KEY`, … | no |
 | Secret in a JSON value | `"apiKey": "value"`, `"client_secret": "value"` | no |
 
-The last three go by a name, so they also ask that the value look made by a machine (twelve characters or more, with a letter and a digit; eight for a connection string). `POSTGRES_PASSWORD=postgres` stays readable.
+The last three go by a name, so they also ask that the value look made by a machine (twelve characters or more, with a letter and a digit; eight for a connection string). `POSTGRES_PASSWORD=postgres` stays readable. For a variable, the value also has to be made of the characters a key takes, up to the end of the assignment: code such as `PASSWORD=hashlib.sha256(seed)` is read as it is.
 
 A token that only says where a listing continues (`nextPageToken`, `continuation_token`, `?pageToken=…`) is left alone, so Claude can ask an API for the next page.
 

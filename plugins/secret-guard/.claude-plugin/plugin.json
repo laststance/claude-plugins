@@ -1,6 +1,6 @@
 {
   "name": "secret-guard",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Keeps secrets out of the conversation: refuses shell commands that spell out a key or token, and masks secrets in tool results before Claude and the transcript get them",
   "author": {
     "name": "Laststance.io",

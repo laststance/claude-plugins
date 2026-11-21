@@ -174,6 +174,35 @@ describe('maskSecrets', () => {
     expect(masked.text).toBe(output)
     expect(masked.found.size).toBe(0)
   })
+
+  test('leaves code that assigns to a variable named like a secret readable', () => {
+    // Arrange: lines of source files, as a read of them returns
+    const output = [
+      'PASSWORD=hashlib.sha256(seed1).hexdigest()',
+      'const pattern = /(?:PAGE|NEXT)_?TOKEN=)([A-Za-z0-9_]*(?:TOKEN|SECRET))=/',
+      "const output = 'POSTGRES_PASSWORD=postgres\\nDATABASE_URL=postgres://app:app@localhost:5432/app1'",
+      'API_KEY=config.keys[0].value2',
+    ].join('\n')
+
+    // Act
+    const masked = maskSecrets(output)
+
+    // Assert
+    expect(masked.text).toBe(output)
+    expect(masked.found.size).toBe(0)
+  })
+
+  test('masks a quoted value in a shell assignment up to its closing quote', () => {
+    // Arrange
+    const output = `export API_TOKEN="${OPAQUE}"; ./deploy.sh`
+
+    // Act
+    const masked = maskSecrets(output)
+
+    // Assert
+    expect(masked.text).toBe('export API_TOKEN="•••"; ./deploy.sh')
+    expect([...masked.found]).toEqual([['secret in an environment variable', 1]])
+  })
 })
 
 describe('findLiteralSecret', () => {

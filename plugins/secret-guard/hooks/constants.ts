@@ -25,6 +25,13 @@ const NOT_A_PAGE_TOKEN = '(?![A-Za-z0-9_.-]*(?:page|next|continuation|cursor|syn
 /** The characters a value takes in a link's query. Anything else (a bracket, a pipe) is code, not a link. */
 const URL_VALUE = '[A-Za-z0-9._~%+/=-]'
 
+/**
+ * The characters of a value that only its variable's name gives away. A bracket, a dot or a backslash
+ * means the text is code (`PASSWORD=hashlib.sha256(seed)`, the source of a pattern), which a person
+ * and Claude have to read as it is.
+ */
+const NAMED_VALUE = '[A-Za-z0-9_+/=~@%!^#*-]'
+
 /** A value that looks made by a machine: it has a letter and a digit. Words such as `postgres` or `changeme` do not. */
 const mixed = (chars: string) => `(?=${chars}*\\d)(?=${chars}*[A-Za-z])`
 
@@ -141,8 +148,8 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // `NAME=value` where the name says secret
     kind: 'secret in an environment variable',
     pattern: new RegExp(
-      `\\b(?![A-Za-z0-9_]*(?:PAGE|NEXT|CONTINUATION|CURSOR|SYNC)_?TOKEN=)([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?))=(["']?)${REFERENCE}${mixed(`[^\\s"'\`;&|]`)}[^\\s"'\`;&|]{12,}\\2`,
-      'g',
+      `\\b(?![A-Za-z0-9_]*(?:PAGE|NEXT|CONTINUATION|CURSOR|SYNC)_?TOKEN=)([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?))=(["']?)${REFERENCE}${mixed(NAMED_VALUE)}${NAMED_VALUE}{12,}\\2(?=$|[\\s;&|)\\]},])`,
+      'gm',
     ),
     replacement: `$1=$2${MASK}$2`,
     isBlocking: false,
