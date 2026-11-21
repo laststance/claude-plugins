@@ -85,10 +85,10 @@ Nothing else: the mod runs inside Claude Code, on every platform it runs on.
 | `maskOutput` | `true` | Mask secrets in what tools return. |
 | `notify` | `true` | Print a line in the transcript when something was masked. |
 
-Change them in `/config`, or in settings:
+Change them with `/plugin configure secret-guard@laststance`, when installing (`--config notify=false`), or in settings:
 
 ```json
-{ "pluginConfigs": { "secret-guard": { "options": { "blockCommands": false } } } }
+{ "pluginConfigs": { "secret-guard@laststance": { "options": { "blockCommands": false } } } }
 ```
 
 ## Limits
