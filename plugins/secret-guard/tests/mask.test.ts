@@ -158,6 +158,22 @@ describe('maskSecrets', () => {
     expect(twice.text).toBe('ANTHROPIC_API_KEY=sk-ant-••• curl -H "Authorization: Bearer •••"')
     expect(twice.found.size).toBe(0)
   })
+
+  test('leaves the token a listing continues from readable, in JSON, in a link and in a variable', () => {
+    // Arrange: one page of an API's answer, the request for the next page, and a script's variable
+    const output = [
+      `{ "items": [], "nextPageToken": "${OPAQUE}" }`,
+      `GET https://api.example.test/v1/items?pageSize=50&pageToken=${OPAQUE}`,
+      `NEXT_PAGE_TOKEN=${OPAQUE}`,
+    ].join('\n')
+
+    // Act
+    const masked = maskSecrets(output)
+
+    // Assert
+    expect(masked.text).toBe(output)
+    expect(masked.found.size).toBe(0)
+  })
 })
 
 describe('findLiteralSecret', () => {
@@ -223,6 +239,21 @@ describe('findLiteralSecret', () => {
 
     // Assert
     expect(kinds).toEqual([undefined, undefined, undefined, undefined])
+  })
+
+  test('finds nothing in a request for the next page of a listing, or in code that only looks like a query', () => {
+    // Arrange
+    const commands = [
+      `curl "https://api.example.test/v1/items?pageSize=50&pageToken=${OPAQUE}"`,
+      // The source of a pattern: `_?TOKEN=` there is an optional character, not the start of a query
+      "sed -E 's/(PAGE|NEXT)_?TOKEN=)([A-Za-z0-9_]*(TOKEN|SECRET))=//' config.txt",
+    ]
+
+    // Act
+    const kinds = commands.map(findLiteralSecret)
+
+    // Assert
+    expect(kinds).toEqual([undefined, undefined])
   })
 
   test('names a search key whose prefix it knows', () => {

@@ -53,6 +53,8 @@ What you type in your own prompt is left as it is: a key you write there is one 
 
 The last three go by a name, so they also ask that the value look made by a machine (twelve characters or more, with a letter and a digit; eight for a connection string). `POSTGRES_PASSWORD=postgres` stays readable.
 
+A token that only says where a listing continues (`nextPageToken`, `continuation_token`, `?pageToken=…`) is left alone, so Claude can ask an API for the next page.
+
 ## Install
 
 At the prompt of a Claude Code terminal session:

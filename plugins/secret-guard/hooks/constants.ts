@@ -16,6 +16,15 @@ export const MAX_SCANNED_CHARS = 5_000_000
 /** A value that stands for a secret without being one: a variable, a command substitution, a placeholder. */
 const REFERENCE = '(?![$`{<%])'
 
+/**
+ * A name that ends in `token` and is no secret: the place to continue a listing from
+ * (`nextPageToken`, `continuation_token`, `sync-token`). Masked, a listing could not be followed.
+ */
+const NOT_A_PAGE_TOKEN = '(?![A-Za-z0-9_.-]*(?:page|next|continuation|cursor|sync)[_-]?token\\b)'
+
+/** The characters a value takes in a link's query. Anything else (a bracket, a pipe) is code, not a link. */
+const URL_VALUE = '[A-Za-z0-9._~%+/=-]'
+
 /** A value that looks made by a machine: it has a letter and a digit. Words such as `postgres` or `changeme` do not. */
 const mixed = (chars: string) => `(?=${chars}*\\d)(?=${chars}*[A-Za-z])`
 
@@ -115,7 +124,7 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // `?signature=…`, `&access_token=…`, and the same under a service's own name (`?tavilyApiKey=…`)
     kind: 'token in a link',
     pattern: new RegExp(
-      `([?&][A-Za-z0-9_.-]*(?:signature|sig|token|api[_-]?key|secret|password|passwd|credentials?)=)${REFERENCE}${mixed(`[^&#\\s'"\`]`)}[^&#\\s'"\`]{16,}`,
+      `([?&]${NOT_A_PAGE_TOKEN}[A-Za-z0-9_.-]*(?:signature|sig|token|api[_-]?key|secret|password|passwd|credentials?)=)${REFERENCE}${mixed(URL_VALUE)}${URL_VALUE}{16,}`,
       'gi',
     ),
     replacement: `$1${MASK}`,
@@ -132,7 +141,7 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // `NAME=value` where the name says secret
     kind: 'secret in an environment variable',
     pattern: new RegExp(
-      `\\b([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?))=(["']?)${REFERENCE}${mixed(`[^\\s"'\`;&|]`)}[^\\s"'\`;&|]{12,}\\2`,
+      `\\b(?![A-Za-z0-9_]*(?:PAGE|NEXT|CONTINUATION|CURSOR|SYNC)_?TOKEN=)([A-Za-z0-9_]*(?:TOKEN|SECRET|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY|CREDENTIALS?))=(["']?)${REFERENCE}${mixed(`[^\\s"'\`;&|]`)}[^\\s"'\`;&|]{12,}\\2`,
       'g',
     ),
     replacement: `$1=$2${MASK}$2`,
@@ -142,7 +151,7 @@ export const SECRET_RULES: readonly SecretRule[] = [
     // `"apiKey": "value"` in JSON, where the key says secret
     kind: 'secret in a JSON value',
     pattern: new RegExp(
-      `("[A-Za-z0-9_.-]*(?:api[_-]?key|token|secret|password|passwd|credentials?)"\\s*:\\s*")${REFERENCE}${mixed('[^"\\s]')}[^"\\s]{12,}(")`,
+      `("${NOT_A_PAGE_TOKEN}[A-Za-z0-9_.-]*(?:api[_-]?key|private[_-]?key|token|secret|password|passwd|credentials?)"\\s*:\\s*")${REFERENCE}${mixed('[^"\\s]')}[^"\\s]{12,}(")`,
       'gi',
     ),
     replacement: `$1${MASK}$2`,
