@@ -1,0 +1,10 @@
+{
+  "name": "always-expand",
+  "version": "0.1.0",
+  "description": "/expand toggles always-expanded rows: tool output and thinking shown in full, as ctrl+o shows them",
+  "author": { "name": "Laststance.io", "url": "https://github.com/laststance" },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/always-expand",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": ["claude-code-mod", "verbose", "transcript", "expand"]
+}

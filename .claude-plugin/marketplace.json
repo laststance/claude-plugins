@@ -9,6 +9,11 @@
   },
   "plugins": [
     {
+      "name": "always-expand",
+      "source": "./plugins/always-expand",
+      "description": "/expand toggles always-expanded rows: tool output and thinking shown in full, as ctrl+o shows them"
+    },
+    {
       "name": "blackout",
       "source": "./plugins/blackout",
       "description": "Toggle with ctrl+space (or /blackout) to blank Claude Code's screen down to the terminal's own background, and back"

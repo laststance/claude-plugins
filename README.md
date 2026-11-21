@@ -6,6 +6,7 @@ Claude Code plugins and mods by [Laststance.io](https://github.com/laststance). 
 
 | Plugin | What it does | Commands |
 | --- | --- | --- |
+| [always-expand](plugins/always-expand) | `/expand` toggles always-expanded tool output and thinking, as ctrl+o shows them | `/expand` |
 | [blackout](plugins/blackout) | Blanks Claude Code's screen down to the terminal background with one key, and back (Claude keeps working) | `/blackout` (`ctrl+space`) |
 | [desktop-notification](plugins/desktop-notification) | macOS notification when Claude Code needs you; a click brings your terminal forward | (hook) |
 | [open-in-editor](plugins/open-in-editor) | Opens the session's project root in your editor of choice (macOS) | `/vscode` `/cursor` `/devin-desktop` `/webstorm` `/phpstorm` `/zed` |
