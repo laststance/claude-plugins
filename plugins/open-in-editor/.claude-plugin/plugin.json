@@ -1,0 +1,10 @@
+{
+  "name": "open-in-editor",
+  "version": "0.1.0",
+  "description": "/vscode /cursor /devin-desktop /webstorm /phpstorm /zed open the session's project root in that editor (macOS)",
+  "author": { "name": "Laststance.io", "url": "https://github.com/laststance" },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/open-in-editor",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": ["claude-code-mod", "editor", "vscode", "cursor", "zed", "jetbrains"]
+}
