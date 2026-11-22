@@ -12,6 +12,7 @@ Claude Code plugins and mods by [Laststance.io](https://github.com/laststance). 
 | [open-in-editor](plugins/open-in-editor) | Opens the session's project root in your editor of choice (macOS) | `/vscode` `/cursor` `/devin-desktop` `/webstorm` `/phpstorm` `/zed` |
 | [secret-guard](plugins/secret-guard) | Refuses shell commands that spell out a key or token, and masks secrets in tool results before Claude and the transcript get them | (mod) |
 | [serena-activate](plugins/serena-activate) | Briefs Claude on Serena in the system prompt and puts its tools in front, so it is used without being asked | (mod) |
+| [syntax-highlight](plugins/syntax-highlight) | Colours Claude's Bash commands and what they print (Markdown, JSON, diffs, `ls -l`, `grep -n`, `plutil -p`) with your editor's theme | (mod) |
 | [thinking-log](plugins/thinking-log) | Shows Claude's thinking as dim lines in the normal transcript, above what it led to | (mod) |
 
 ## Install
