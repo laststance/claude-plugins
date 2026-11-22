@@ -1,0 +1,332 @@
+// Decides how an Output block is coloured: which Language the whole block is, and which Output shapes its lines may
+// have. Shared by the hooks module (to skip blocks with nothing to colour) and tokenize.mjs (to colour them): no Node,
+// no I/O. Every rule is deterministic: the same command and output always plan the same way.
+
+import { lex, programOf } from './shell.mjs'
+
+/**
+ * @typedef {object} OutputPlan
+ * @property {string | null} language - Language of the whole block, as a language id or file extension the worker
+ *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
+ * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
+ */
+
+// ---------- Output shapes ----------
+
+const STRING = '"(?:[^"\\\\]|\\\\.)*"'
+const PLUTIL_VALUE = [
+  { match: STRING, name: 'string.quoted.double.plutil' },
+  { match: '\\b(?:true|false)\\b', name: 'constant.language.plutil' },
+  { match: '-?\\b\\d+(?:\\.\\d+)?\\b', name: 'constant.numeric.plutil' },
+  { match: '<[0-9a-fA-F ]+>', name: 'constant.other.data.plutil' },
+]
+
+/**
+ * The Output shapes, in the order a line is tested against them. `programs` turn a shape on when the command runs one
+ * of them; `line` says whether a line has the shape; `patterns` colour such a line (TextMate rules, one line at a time).
+ * The regex sources are written once and read by both JavaScript and oniguruma, so they keep to syntax both share.
+ */
+const SHAPES = [
+  {
+    id: 'ls',
+    // `ls -l` / `ls -la`: mode, links, owner, group, size, date, name; `total N`; `dir:` headers of a multi-folder list
+    programs: ['ls', 'gls'],
+    line: /^(?:[-bcdlpsD][-rwxsStT]{9}[@+.]?\s+\d+\s|total \d|\S.*:$)/,
+    patterns: [
+      { match: '^(total)(\\s+)(\\S+)$', captures: { 1: { name: 'keyword.other.total.ls' }, 3: { name: 'constant.numeric.ls' } } },
+      ...['d', 'l', 'x', 'f'].map(kind => ({
+        match: `^(${kind === 'd' ? 'd' : kind === 'l' ? 'l' : '[-bcpsD]'})(${kind === 'x' ? '[-rwxsStT]{2}[xsS][-rwxsStT]{6}|[-rwxsStT]{5}[xsS][-rwxsStT]{3}|[-rwxsStT]{8}[xtT]' : '[-rwxsStT]{9}'})([@+.]?)(\\s+)(\\d+)(\\s+)(\\S+)(\\s+)(\\S+)(\\s+)(\\S+(?:,\\s*\\d+)?)(\\s+)(\\S+\\s+\\S+\\s+\\S+)(\\s)(.*)$`,
+        captures: {
+          1: { name: 'keyword.other.type.ls' },
+          2: { name: 'storage.modifier.mode.ls' },
+          3: { name: 'comment.xattr.ls' },
+          5: { name: 'constant.numeric.links.ls' },
+          7: { name: 'variable.other.owner.ls' },
+          9: { name: 'variable.other.group.ls' },
+          11: { name: 'constant.numeric.size.ls' },
+          13: { name: 'comment.date.ls' },
+          15: kind === 'd' ? { name: 'entity.name.type.directory.ls' }
+            : kind === 'l' ? { patterns: [{ match: '(.*?)( -> )(.*)', captures: { 1: { name: 'entity.name.tag.symlink.ls' }, 2: { name: 'keyword.operator.arrow.ls' }, 3: { name: 'string.unquoted.target.ls' } } }] }
+              : kind === 'x' ? { name: 'entity.name.function.executable.ls' } : {},
+        },
+      })),
+      { match: '^(\\S.*)(:)$', captures: { 1: { name: 'entity.name.section.folder.ls' } } },
+    ],
+  },
+  {
+    id: 'plutil',
+    // `plutil -p`: `"key" => value` and `0 => value`
+    programs: ['plutil'],
+    line: /^\s*(?:"(?:[^"\\]|\\.)*"|\d+) => /,
+    patterns: [
+      {
+        match: `^(\\s*)(${STRING})( => )(.*)$`,
+        captures: { 2: { name: 'support.type.property-name.plutil' }, 3: { name: 'keyword.operator.arrow.plutil' }, 4: { patterns: PLUTIL_VALUE } },
+      },
+      {
+        match: '^(\\s*)(\\d+)( => )(.*)$',
+        captures: { 2: { name: 'constant.numeric.index.plutil' }, 3: { name: 'keyword.operator.arrow.plutil' }, 4: { patterns: PLUTIL_VALUE } },
+      },
+    ],
+  },
+  {
+    id: 'git-status',
+    // `git status --short` (`XY path`, `## branch...upstream [ahead 1]`) and the long form's `modified:   path` rows
+    programs: ['git status'],
+    line: /^(?:[ MTADRCU?!]{2} \S|## \S|\t(?:modified|new file|deleted|renamed|typechange|both modified|both added):\s|On branch \S)/,
+    patterns: [
+      {
+        match: '^([ MTADRCU?!])([ MTADRCU?!])( )(.*)$',
+        captures: {
+          1: { patterns: [{ match: 'M|T', name: 'markup.changed.git-status' }, { match: 'A|\\?', name: 'markup.inserted.git-status' }, { match: 'D', name: 'markup.deleted.git-status' }, { match: 'R|C|U|!', name: 'keyword.other.git-status' }] },
+          2: { patterns: [{ match: 'M|T', name: 'markup.changed.git-status' }, { match: 'A|\\?', name: 'markup.inserted.git-status' }, { match: 'D', name: 'markup.deleted.git-status' }, { match: 'R|C|U|!', name: 'keyword.other.git-status' }] },
+        },
+      },
+      { match: '^(## )(\\S+?)(?:(\\.\\.\\.)(\\S+))?( \\[.*\\])?$', captures: { 2: { name: 'entity.name.function.branch.git-status' }, 4: { name: 'string.unquoted.upstream.git-status' }, 5: { name: 'constant.numeric.ahead-behind.git-status' } } },
+      { match: '^(On branch )(\\S+)', captures: { 2: { name: 'entity.name.function.branch.git-status' } } },
+      { match: '^(\\t)(modified|typechange|both modified)(:)', captures: { 2: { name: 'markup.changed.git-status' } } },
+      { match: '^(\\t)(new file|both added)(:)', captures: { 2: { name: 'markup.inserted.git-status' } } },
+      { match: '^(\\t)(deleted)(:)', captures: { 2: { name: 'markup.deleted.git-status' } } },
+      { match: '^(\\t)(renamed)(:)', captures: { 2: { name: 'keyword.other.git-status' } } },
+    ],
+  },
+  {
+    id: 'wc',
+    // `wc -l a b`: counts, then the name (`total` for the sum)
+    programs: ['wc'],
+    line: /^\s*\d+(?:\s+\d+)*(?:\s+\S.*)?$/,
+    patterns: [
+      { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)(\\s+)(total)$', captures: { 2: { name: 'constant.numeric.count.wc' }, 4: { name: 'keyword.other.total.wc' } } },
+      { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)', captures: { 2: { name: 'constant.numeric.count.wc' } } },
+    ],
+  },
+  {
+    id: 'grep',
+    // `grep -n` / `rg`: `path:line:text`, context rows `path-line-text`, `path:text` across files, `line:text` in one
+    // file, `--` between groups
+    programs: ['grep', 'egrep', 'fgrep', 'ggrep', 'rg', 'ag', 'git grep'],
+    line: /^(?:[^:\s][^:]*?[:-]\d+[:-]|[^:\s]*\/[^:]*:|[^:\s/]+\.[A-Za-z0-9]+:|\d+[:-]|--$)/,
+    patterns: [
+      { match: '^(--)$', captures: { 1: { name: 'comment.separator.grep' } } },
+      {
+        match: '^([^:\\s][^:]*?)([:-])(\\d+)([:-])',
+        captures: { 1: { name: 'entity.name.type.path.grep' }, 2: { name: 'punctuation.separator.grep' }, 3: { name: 'constant.numeric.line.grep' }, 4: { name: 'punctuation.separator.grep' } },
+      },
+      { match: '^([^:\\s]*/[^:]*|[^:\\s/]+\\.[A-Za-z0-9]+)(:)', captures: { 1: { name: 'entity.name.type.path.grep' }, 2: { name: 'punctuation.separator.grep' } } },
+      { match: '^(\\d+)([:-])', captures: { 1: { name: 'constant.numeric.line.grep' }, 2: { name: 'punctuation.separator.grep' } } },
+    ],
+  },
+]
+
+const SHAPE_BY_ID = new Map(SHAPES.map(shape => [shape.id, shape]))
+
+/** Every Output shape id, in test order: what an Output block of an unknown command is tested against. */
+export const SHAPE_IDS = SHAPES.map(shape => shape.id)
+
+/**
+ * The TextMate scope an Output shape's grammar is registered under.
+ *
+ * @param id - An Output shape id from {@link SHAPE_IDS}.
+ * @returns the scope, `text.output.<id>`
+ * @example
+ * shapeScope('ls') // => 'text.output.ls'
+ */
+export const shapeScope = id => `text.output.${id}`
+
+/**
+ * The TextMate grammar of every Output shape, keyed by scope, for the worker's grammar registry.
+ *
+ * @returns `{ [scope]: rawGrammar }`
+ * @example
+ * shapeGrammars()['text.output.ls'].patterns.length // => 6
+ */
+export const shapeGrammars = () =>
+  Object.fromEntries(SHAPES.map(shape => [shapeScope(shape.id), { scopeName: shapeScope(shape.id), patterns: shape.patterns }]))
+
+// ---------- the Language a command prints ----------
+
+/** Programs that print nothing on success, so they never decide what an Output block holds. */
+const SILENT = new Set(['cd', 'pushd', 'popd', 'export', 'unset', 'set', 'source', '.', 'alias', 'unalias', 'trap', 'mkdir', 'rmdir', 'touch', 'rm', 'mv', 'cp', 'ln', 'chmod', 'chown', 'true', 'false', ':', 'sleep', 'wait', 'shopt', 'setopt'])
+
+/** Programs that print the files they are given (or their stdin, unchanged) */
+const VIEWERS = new Set(['cat', 'bat', 'batcat', 'head', 'tail', 'less', 'more', 'nl', 'tac'])
+
+/** Programs that pass lines of their stdin through, so a pipeline keeps the Language of what fed it */
+const FILTERS = new Set(['head', 'tail', 'grep', 'egrep', 'fgrep', 'rg', 'sort', 'uniq', 'less', 'more', 'tac', 'nl'])
+
+/** Flags of a viewer that take a value, which is not a file (`head -n 20`, `tail -c 100`, `bat -l md`). */
+const VALUE_FLAGS = new Set(['-n', '-c', '-l', '--lines', '--bytes', '--language', '-r', '--line-range', '--style', '--theme'])
+
+const extensionOf = file => {
+  const name = file.slice(file.lastIndexOf('/') + 1)
+  const dot = name.lastIndexOf('.')
+  return dot > 0 ? name.slice(dot + 1).toLowerCase() : null
+}
+
+/** The extension all the files share, or null when they differ, lack one or there are none. */
+const sharedExtension = files => {
+  const exts = new Set(files.map(extensionOf))
+  if (exts.size !== 1) return null
+  return [...exts][0]
+}
+
+/** The words of `args` that name files: not flags, and not the values of flags that take one. */
+const fileArgs = args => {
+  const files = []
+  for (let k = 0; k < args.length; k++) {
+    const a = args[k]
+    if (VALUE_FLAGS.has(a)) { k++; continue }
+    if (a === '-' || a.startsWith('-') || a.startsWith('+')) continue
+    files.push(a)
+  }
+  return files
+}
+
+/** A git subcommand past git's own flags (`git -C repo diff` -> `diff`), and the words after it. */
+const gitSubcommand = args => {
+  for (let k = 0; k < args.length; k++) {
+    if (args[k] === '-C' || args[k] === '-c' || args[k] === '--git-dir' || args[k] === '--work-tree') { k++; continue }
+    if (args[k].startsWith('-')) continue
+    return { sub: args[k], rest: args.slice(k + 1) }
+  }
+  return { sub: null, rest: [] }
+}
+
+/** The names a program is known by for {@link SHAPES}: `git status` for git's subcommands, else the program. */
+const namesOf = program => {
+  if (program.name !== 'git') return [program.name]
+  const { sub } = gitSubcommand(program.args)
+  return sub ? [`git ${sub}`] : []
+}
+
+/**
+ * The Language a pipeline stage prints, given what fed it.
+ *
+ * @param program - The stage's program, from {@link programOf}.
+ * @param fed - The Language of the stage's stdin (the stage before it in a pipeline), or null.
+ * @returns a language id or extension, or null when the stage prints no known Language
+ */
+const languageOf = (program, fed) => {
+  const { name, args } = program
+  if (VIEWERS.has(name)) {
+    const files = fileArgs(args)
+    // a viewer with no file reads its stdin: what fed it passes through
+    if (files.length === 0) return fed
+    return sharedExtension(files)
+  }
+  if (name === 'sed' && args.includes('-n')) {
+    // `sed -n '1,40p' file.md` prints lines of the file as they are; the script is the first plain word (sed's -n takes
+    // no value, unlike head's)
+    const files = args.filter(a => !a.startsWith('-')).slice(1)
+    return files.length === 0 ? fed : sharedExtension(files)
+  }
+  if (FILTERS.has(name)) {
+    // a filter given files of its own (`grep -n x a.ts`) prints Output shapes, not the Language
+    const plain = fileArgs(args)
+    return plain.length <= 1 ? fed : null
+  }
+  if (name === 'jq' || name === 'gojq' || name === 'jaq') return args.some(a => /^-[a-zA-Z]*[rj]/.test(a) || a === '--raw-output') ? null : 'json'
+  if (name === 'yq') return args.some((a, k) => (a === '-o' || a === '--output-format') && /^j/.test(args[k + 1] ?? '')) || args.includes('-oj') ? 'json' : 'yaml'
+  if (name === 'plutil' && args.includes('-convert')) return args[args.indexOf('-convert') + 1] === 'json' ? 'json' : args[args.indexOf('-convert') + 1] === 'xml1' ? 'xml' : null
+  if (name === 'diff') return args.some(a => /^-[a-zA-Z]*u/.test(a) || a === '--unified') ? 'diff' : null
+  if (name === 'gh') return args[0] === 'api' ? 'json' : null
+  if (name === 'git') {
+    const { sub, rest } = gitSubcommand(args)
+    if (sub === 'diff' || sub === 'show' || sub === 'format-patch') return rest.some(a => a === '--stat' || a === '--name-only' || a === '--name-status' || a === '--shortstat' || a === '--numstat') ? null : 'diff'
+    if ((sub === 'log' || sub === 'stash') && rest.some(a => a === '-p' || a === '--patch')) return 'diff'
+    return null
+  }
+  return null
+}
+
+/**
+ * Plans how to colour the Output block of a command: the Language of the whole block, and the Output shapes its lines
+ * may have.
+ *
+ * The Language comes from the commands that print: a stage piped into another prints nothing of its own, a silent
+ * command (`cd`) prints nothing at all. When the printing commands name exactly one Language (`cd x && cat a.md`),
+ * the block is that Language. Output shapes are turned on by any stage that runs their program, piped or not, since a
+ * filter keeps a line's shape (`plutil -p f | grep Bundle`). A command that cannot be read (empty: a row drawn before
+ * its command was seen) turns on every shape.
+ *
+ * @param command - The shell command the Bash call ran, or '' when unknown.
+ * @param output - The block's text, for a JSON block whose command names no Language (`curl`, `gh pr view --json`).
+ * @returns the plan
+ * @example
+ * planOutput('cd refs && cat pitfalls.md records.md', '# Pitfalls')
+ * // => { language: 'md', shapes: [] }
+ * planOutput('wc -l *.md && cat this-mac.md', '  95 developing.md\n# This Mac')
+ * // => { language: 'md', shapes: ['wc'] }
+ */
+export const planOutput = (command, output) => {
+  const segments = command.trim() === '' ? [] : lex(command)
+  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS }
+
+  const names = new Set()
+  const printed = new Set()
+  let fed = null
+  for (const seg of segments) {
+    const program = programOf(seg)
+    const isPiped = seg.op === '|' || seg.op === '|&'
+    if (program !== null) {
+      for (const name of namesOf(program)) names.add(name)
+      fed = languageOf(program, fed)
+    }
+    // the last stage of a pipeline prints; a silent command prints nothing
+    if (!isPiped) {
+      if (program !== null && !SILENT.has(program.name)) printed.add(fed)
+      fed = null
+    }
+  }
+
+  const languages = [...printed].filter(lang => lang !== null)
+  const language = languages.length === 1 ? languages[0] : languages.length === 0 ? sniffJson(output) : null
+  const shapes = SHAPES.filter(shape => shape.programs.some(name => names.has(name))).map(shape => shape.id)
+  return { language, shapes }
+}
+
+/** Blocks past this size are not parsed to see whether they are JSON. */
+const MAX_SNIFF = 200_000
+
+/** `json` when the whole text parses as a JSON object or array, else null. */
+const sniffJson = output => {
+  const text = output.trim()
+  if (text.length > MAX_SNIFF || !/^[[{]/.test(text) || !/[\]}]$/.test(text)) return null
+  try { JSON.parse(text); return 'json' } catch { return null }
+}
+
+// ---------- which line is coloured how ----------
+
+/** What {@link assignLines} gives a line drawn in the block's Language. */
+export const BLOCK = 'block'
+
+/**
+ * Gives each line of an Output block what colours it: the first Output shape of the plan it has, else the block's
+ * Language, else nothing.
+ *
+ * @param lines - The block's lines.
+ * @param plan - From {@link planOutput}.
+ * @returns per line, an Output shape's scope (`text.output.ls`), {@link BLOCK}, or null for a line left as it is
+ * @example
+ * assignLines(['  95 a.md', '# Title'], { language: 'md', shapes: ['wc'] })
+ * // => ['text.output.wc', 'block']
+ */
+export const assignLines = (lines, plan) => {
+  const shapes = plan.shapes.map(id => SHAPE_BY_ID.get(id)).filter(Boolean)
+  return lines.map(line => {
+    const shape = shapes.find(s => s.line.test(line))
+    if (shape) return shapeScope(shape.id)
+    return plan.language === null ? null : BLOCK
+  })
+}
+
+/**
+ * Whether a plan colours anything of an Output block, so a block with nothing to colour is drawn by Claude Code as is.
+ *
+ * @param lines - The block's lines.
+ * @param plan - From {@link planOutput}.
+ * @returns true when the block has a Language or a line with one of the plan's Output shapes
+ * @example
+ * hasColour(['hello'], { language: null, shapes: ['ls'] }) // => false
+ */
+export const hasColour = (lines, plan) => plan.language !== null || assignLines(lines, plan).some(scope => scope !== null)
