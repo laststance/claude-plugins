@@ -23,9 +23,11 @@ class TranscriptTests(unittest.TestCase):
         self.output = Path(directory.name) / "history.jsonl"
 
     def run_export(self, rows, tip=None):
-        self.journal.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        self.journal.write_text(
+            "".join(json.dumps(row, ensure_ascii=False) + "\n" for row in rows), encoding="utf-8"
+        )
         count = export_history(self.journal, self.output, tip)
-        records = [json.loads(line) for line in self.output.read_text().splitlines()]
+        records = [json.loads(line) for line in self.output.read_text(encoding="utf-8").splitlines()]
         self.assertEqual(count, len(records))
         return records
 
@@ -58,6 +60,27 @@ class TranscriptTests(unittest.TestCase):
                 "content": "E_FAIL\n<system-reminder>literal output</system-reminder>",
             }]},
             {"role": "assistant", "content": [{"type": "text", "text": "Failed.\nNext line."}]},
+        ])
+
+    def test_visible_synthetic_api_error_is_exported_once_and_synthetic_placeholder_is_excluded(self):
+        # Arrange
+        error = entry("2", "1", "assistant", [
+            {"type": "text", "text": "API Error: 429\nしばらくしてから再試行してください。"},
+        ], isApiErrorMessage=True)
+        error["message"]["model"] = "<synthetic>"
+        placeholder = entry("3", "2", "assistant", [{"type": "text", "text": "No response requested."}])
+        placeholder["message"]["model"] = "<synthetic>"
+        rows = [entry("1", None, "user", "Retry"), error, placeholder]
+
+        # Act
+        history = self.run_export(rows)
+
+        # Assert
+        self.assertEqual(history, [
+            {"role": "user", "content": "Retry"},
+            {"role": "assistant", "content": [
+                {"type": "text", "text": "API Error: 429\nしばらくしてから再試行してください。"},
+            ]},
         ])
 
     def test_compact_preserves_originals_once_and_drops_replaced_branches_and_summaries(self):

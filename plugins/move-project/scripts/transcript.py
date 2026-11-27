@@ -34,7 +34,8 @@ def _visible_content(row: dict, local_commands: set[str]) -> str | list | None:
         local_commands.add(prompt_id)
     if row.get("isMeta") or row.get("isCompactSummary") or row.get("isVisibleInTranscriptOnly"):
         return None
-    if message.get("model") == "<synthetic>":
+    # Claude uses the synthetic model for both visible API errors and internal placeholders.
+    if message.get("model") == "<synthetic>" and not row.get("isApiErrorMessage"):
         return None
     if prompt_id in local_commands and not row.get("promptSource"):
         return None
