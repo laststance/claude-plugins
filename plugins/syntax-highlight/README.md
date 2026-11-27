@@ -20,7 +20,7 @@ From a shell:
 claude plugin install syntax-highlight --marketplace laststance/claude-plugins
 ```
 
-Requires `node` on the PATH and Claude Code 2.1.287 or later (tested with 2.1.330).
+Requires `node` on the PATH and Claude Code 2.1.330 or later (tested with 2.1.330 and 2.1.332).
 
 **Coming from syntax-cmd?** Uninstall it (`claude plugin uninstall syntax-cmd@claude-syntax-cmd`): both mods redraw the same rows. Your edited `~/.claude/syntax-cmd/runners.json` is not read any more; copy it to `~/.claude/syntax-highlight/runners.json`.
 
@@ -49,7 +49,7 @@ Requires `node` on the PATH and Claude Code 2.1.287 or later (tested with 2.1.33
 
   Inside a Language block only rows nothing else prints keep their shape: an `ls -l` row, a `path:12:` hit, a `wc` row (counts padded to 8 columns, or before a name with a `.` or `/`, or `total`), a `git status --short` row of status letters and one path, `## branch...upstream`. So `wc -l *.md && cat README.md` colours both, while a heading (`## Usage`), a time (`09:30`), an indented number (`  3 items`), a line opening with status-like capitals (`MR 12 is merged`) or a frontmatter key ending in `:` stays in the Language.
 
-A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Blocks with stderr, errors, interrupts, images or background tasks are left to Claude Code. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
+A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Claude Code's own rows under a block stay Claude Code's and are drawn below the coloured text, behind their own `⎿`: the "Shell cwd was reset" notice a command leaves after a `cd` out of the project, stderr, the diff of files a command changed, and images it viewed. The one exception is collapsed: the one-time note Claude Code adds under the first edit diff of a session is not drawn under a coloured block. Blocks with errors, interrupts, background tasks or an exit code's explanation are left to Claude Code. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
 
 Claude Code itself hides the output of some lone file reads (a bare `cat file.md` or `jq . file.json`), so there is nothing to colour there.
 
@@ -91,7 +91,7 @@ The first runs the planning and rendering tests in Claude Code's mod test kit; t
 
 ## Credits and licenses
 
-Forked from [Lucasbk38/claude-syntax-cmd](https://github.com/Lucasbk38/claude-syntax-cmd) at `a791d1d` (v0.2.3), MIT. Why a fork and not a companion mod: [docs/adr/0001](docs/adr/0001-fork-syntax-cmd-and-draw-output-blocks.md).
+Forked from [Lucasbk38/claude-syntax-cmd](https://github.com/Lucasbk38/claude-syntax-cmd) at `a791d1d` (v0.2.3), MIT. Why a fork and not a companion mod: [docs/adr/0001](docs/adr/0001-fork-syntax-cmd-and-draw-output-blocks.md). Why Claude Code still draws the rows under a block: [docs/adr/0002](docs/adr/0002-claude-code-draws-sibling-rows.md).
 
 Bundled TextMate grammars and themes come from [tm-grammars and tm-themes](https://github.com/shikijs/textmate-grammars-themes) (MIT); `vscode-textmate` and `vscode-oniguruma` are vendored (MIT). See `bundled/` and `vendor/` for their licenses.
 

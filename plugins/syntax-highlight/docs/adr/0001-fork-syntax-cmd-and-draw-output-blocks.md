@@ -11,4 +11,4 @@ syntax-highlight is a full fork of [Lucasbk38/claude-syntax-cmd](https://github.
 ## Consequences
 
 - Output blocks are coloured when expanded too (ctrl+o, `verbose`), against the mod convention of leaving expanded rows to Claude Code. With Verbose output on, that convention would leave every block uncoloured.
-- A block with stderr, an error, an interrupt, an image or a background task is left to Claude Code, which draws those parts its own way.
+- A block with stderr, an error, an interrupt, an image or a background task is left to Claude Code, which draws those parts its own way. (Superseded for stderr, edit diffs and viewed images by [0002](0002-claude-code-draws-sibling-rows.md).)
