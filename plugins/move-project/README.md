@@ -35,7 +35,7 @@ Open a new terminal or run `source ~/.zshrc`, then start `claude` in the consume
 
 An absolute path also works. For a name containing spaces, type `/move-project ../Library B`. The destination is resolved against Claude's current working directory. A missing directory or unreadable conversation leaves the original session open.
 
-Once the archive is ready, the plugin exits the source session. The launcher starts Claude in the destination using the parent shell environment. If you set `CLAUDE_CONFIG_DIR` and want the same user configuration across projects, use an absolute path. A relative value resolves in the new directory as it would after a shell `cd`. The normal trust dialog applies to an unfamiliar repository. The source session stays available through `claude --resume` in its original project.
+Once the archive is ready, the plugin exits the source session. The launcher starts Claude in the destination using the parent shell environment. Options you passed on the original command line, such as `--settings`, apply only to the source session. If you set `CLAUDE_CONFIG_DIR` and want the same user configuration across projects, use an absolute path. Claude resolves a relative value from each project's directory. The launcher stores every handoff under the configuration directory it resolved at startup. The normal trust dialog applies to an unfamiliar repository. The source session stays available through `claude --resume` in its original project.
 
 ### What the destination receives
 
