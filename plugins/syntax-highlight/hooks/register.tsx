@@ -33,9 +33,9 @@ type Colourable = { stdout: string; hasSiblings: boolean }
 const SHOW_CODE = 'mcp__syntax-highlight__show_code'
 const DIM_TO = '#999999'
 const MAX_CACHED = 200
-// Calls whose command, and whether their result waits for it, are kept: a short string or a flag each, so far more
-// than MAX_CACHED. A command forgotten while its rows are still drawn makes its result wait again and its row ask for a
-// redraw again, on every pass, once more results are drawn than this keeps
+// Calls and commands kept track of: each call's command, whether its result waits for it, whether its Output block's
+// colours were pushed out, and each command's colours. All small, so far more than MAX_CACHED: one forgotten while its
+// row is still drawn would be coloured again on every redraw, without end, once more rows are drawn than this keeps
 const MAX_CALLS = 20_000
 // An Output block is coloured up to this many lines or characters; the rest is drawn as it is
 const MAX_OUTPUT_LINES = 2000
@@ -52,6 +52,10 @@ const cache = new Map<string, Colours>()
 // misses (another mod can rewrite a call's record after the tool.call hook coloured it, as secret-guard masks secrets),
 // and the key stays short
 const outputColours = new Map<string, { source: string; colours: Colours }>()
+// Output blocks whose colours were made and then pushed out of a full outputColours: Claude Code draws them as they
+// are, as colouring one again would push out another, and with more blocks drawn than it holds every redraw would start
+// workers without end
+const pushedOut = new Map<string, true>()
 // each call's command, which plans its Output block
 const commands = new Map<string, string>()
 // outputPayload's answers, per call and command, each with the capped text it was planned from, so a redraw does not
@@ -80,15 +84,22 @@ const keyOf = (payload: Exclude<Payload, OutputPayload>) => ('code' in payload ?
 // an Output block's colours are kept per call and plan: a command learned later (a resumed session) plans it differently
 const outputKey = (payload: OutputPayload) => `${payload.id}:${payload.plan.language ?? ''}:${payload.plan.shapes.join(',')}`
 
-/** Keeps a bounded map from growing past `max` entries ({@link MAX_CACHED} unless given), oldest out first. */
-const remember = <V,>(map: Map<string, V>, key: string, value: V, max = MAX_CACHED) => {
+/**
+ * Keeps a bounded map from growing past `max` entries ({@link MAX_CACHED} unless given), oldest out first.
+ *
+ * @param onPushOut - Told the key of an entry pushed out to make room.
+ */
+const remember = <V,>(map: Map<string, V>, key: string, value: V, max = MAX_CACHED, onPushOut?: (key: string) => void) => {
   map.set(key, value)
-  if (map.size > max) map.delete(map.keys().next().value as string)
+  if (map.size <= max) return
+  const oldest = map.keys().next().value as string
+  map.delete(oldest)
+  onPushOut?.(oldest)
 }
 
 /**
  * The colours cached for a payload: a command's or a snippet's by its text, an Output block's only when they were made
- * from the same text.
+ * from the same text, and `'plain'` for an Output block whose colours were pushed out of the cache.
  *
  * Called by every hook before it colours or draws.
  *
@@ -99,15 +110,22 @@ const remember = <V,>(map: Map<string, V>, key: string, value: V, max = MAX_CACH
  */
 const coloursOf = (payload: Payload): Colours | undefined => {
   if (!('output' in payload)) return cache.get(keyOf(payload))
-  const kept = outputColours.get(outputKey(payload))
+  const key = outputKey(payload)
+  const kept = outputColours.get(key)
   // colours of the same call and plan made from other text (the record before another mod rewrote it) are no answer
-  return kept !== undefined && kept.source === payload.output ? kept.colours : undefined
+  if (kept !== undefined) return kept.source === payload.output ? kept.colours : undefined
+  // coloured once and pushed out since: Claude Code draws it, so redrawing many blocks cannot start workers forever
+  return pushedOut.has(key) ? 'plain' : undefined
 }
 
 /** Caches a payload's colours where {@link coloursOf} finds them. Called by {@link highlight}. */
 const keepColours = (payload: Payload, colours: Colours) => {
-  if ('output' in payload) remember(outputColours, outputKey(payload), { source: payload.output, colours })
-  else remember(cache, keyOf(payload), colours)
+  if ('output' in payload) {
+    remember(outputColours, outputKey(payload), { source: payload.output, colours }, MAX_CACHED, key => remember(pushedOut, key, true, MAX_CALLS))
+  } else {
+    // a command's colours are small: as many are kept as calls, so a long session's rows never take turns being coloured
+    remember(cache, keyOf(payload), colours, MAX_CALLS)
+  }
 }
 
 // whether any run of a result has a colour or a style
@@ -149,13 +167,41 @@ const highlight = async ($: EngineInterface, payload: Payload) => {
 }
 
 /**
+ * The stderr Claude Code's Bash renderer draws: without the `<sandbox_violations>` reports Claude Code appends to it
+ * and takes out again before drawing (2.1.332), trimmed.
+ *
+ * Read with indexOf rather than a lazy regex, so an unclosed report in a long stderr stays linear. Called by
+ * {@link colourableResult}.
+ *
+ * @param stderr - A Bash result's stderr.
+ * @returns the stderr as drawn; empty when only reports or blank space were in it
+ * @example
+ * shownStderr('\n<sandbox_violations>\nnetwork denied\n</sandbox_violations>') // => ''
+ */
+const shownStderr = (stderr: string) => {
+  const OPEN = '<sandbox_violations>'
+  const CLOSE = '</sandbox_violations>'
+  let shown = ''
+  let from = 0
+  // cut out each report, from its opening tag to the first closing tag after it; an unclosed one stays, as in Claude Code
+  for (let open = stderr.indexOf(OPEN); open !== -1; open = stderr.indexOf(OPEN, from)) {
+    const close = stderr.indexOf(CLOSE, open + OPEN.length)
+    if (close === -1) break
+    shown += stderr.slice(from, open)
+    from = close + CLOSE.length
+  }
+  return (shown + stderr.slice(from)).trim()
+}
+
+/**
  * The part of a Bash result this mod colours, and whether Claude Code still has sibling rows to draw under it.
  *
  * Sibling rows are what Claude Code's own Bash renderer draws after the stdout: stderr (in practice only its
  * "Shell cwd was reset to …" notice, since a command's own stderr is merged into stdout), an edit diff and viewed
  * images. The `ToolResult` hook draws the coloured stdout and lets Claude Code draw those rows beneath it. A
- * persisted-output note alone is not one: for an emptied stdout with only that note, Claude Code draws "(No output)".
- * Called by the `tool.call` hook (to colour before the first draw) and the `ToolResult` hook.
+ * persisted-output note alone is not one, nor a stderr holding only Claude Code's sandbox-violations report: for an
+ * emptied stdout with nothing else, Claude Code draws "(No output)". Called by the `tool.call` hook (to colour before
+ * the first draw) and the `ToolResult` hook.
  *
  * @param output - The tool's result record.
  * @returns the stdout with its trailing blank space cut and whether sibling rows exist, or null when Claude Code should
@@ -172,7 +218,7 @@ const colourableResult = (output: unknown): Colourable | null => {
   // trimEnd, not a /\s+$/ replace: that retries from every space of a long run inside the text, quadratic in its length
   const stdout = out.stdout.trimEnd()
   if (stdout === '') return null
-  const hasStderr = typeof out.stderr === 'string' && out.stderr.trim() !== ''
+  const hasStderr = typeof out.stderr === 'string' && shownStderr(out.stderr) !== ''
   const hasImages = Array.isArray(out.viewedImagePaths) && out.viewedImagePaths.length > 0
   return { stdout, hasSiblings: hasStderr || Boolean(out.bashEditDiff) || hasImages }
 }
@@ -348,8 +394,12 @@ export const register: Register = (on, userOptions) => {
     if (e.props.tool !== 'Bash' || e.props.isErrored) return next(e)
     const result = colourableResult(e.props.output)
     if (result === null) return next(e)
-    // drawn before its command is known: the ToolUse hook asks for a redraw once it learns it
-    if (!commands.has(e.props.tool_use_id)) remember(waitingForCommand, e.props.tool_use_id, true, MAX_CALLS)
+    // drawn before its command is known (a resumed session draws results first): Claude Code draws it until the ToolUse
+    // hook learns the command and asks for a redraw, so no worker colours it from a guess first
+    if (!commands.has(e.props.tool_use_id)) {
+      remember(waitingForCommand, e.props.tool_use_id, true, MAX_CALLS)
+      return next(e)
+    }
     const { head, rest } = capOutput(result.stdout)
     const payload = outputPayload(e.props.tool_use_id, head)
     if (payload === null) return next(e)

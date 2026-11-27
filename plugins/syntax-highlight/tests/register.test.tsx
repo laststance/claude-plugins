@@ -221,7 +221,7 @@ test('a result with nothing to colour, an interrupt, an image, a background task
   }
 })
 
-test('a result drawn before its command is known (a resumed session) is coloured again from the command once it arrives', async ($, on) => {
+test('a result drawn before its command is known (a resumed session) is Claude Code\'s until the command arrives, then coloured once from it', async ($, on) => {
   // Arrange: the command's colours are already cached (the same command ran earlier), so drawing its row starts no
   // worker and asks for no redraw of its own; the Output block is then drawn with no command known
   const seen = standInForClaudeCode(on)
@@ -229,14 +229,17 @@ test('a result drawn before its command is known (a resumed session) is coloured
   const output = { stdout: '## Heading\nBody text.\n', stderr: '', interrupted: false, isImage: false }
   const block = await $.ui.mount(outputBlock('call-10', output))
   await block.redraw()
+  const textsBeforeCommand = (await block.findAll({ type: 'Text' })).map(t => t.text)
 
   // Act: the block's own command row is drawn
   const row = await $.ui.mount(commandRow('call-10', 'cat notes.md'))
   await block.find({ type: 'Text' })
 
-  // Assert: the worker coloured the block a second time, planned from the command
+  // Assert: no worker guessed at the block before its command; one coloured it from the command
   const outputRuns = seen.workerInputs.filter(asked => typeof asked.output === 'string').map(asked => asked.command)
-  expect(outputRuns).toEqual(['', 'cat notes.md'])
+  expect(textsBeforeCommand).toEqual([CLAUDE_CODE_DRAWS])
+  expect(outputRuns).toEqual(['cat notes.md'])
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toContain('## Heading')
   for (const handle of [row, block, earlier]) await handle.unmount()
 })
 
@@ -429,4 +432,43 @@ test('a result with a long run of spaces inside a line is drawn coloured at once
   expect(texts).toContain('# Notes')
   expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
   await block.unmount()
+})
+
+test('more coloured results drawn at once than the colour cache holds start no further workers when drawn again', { timeoutMs: 60_000 }, async ($, on) => {
+  // Arrange: 201 coloured results, each under its own command row, one more than the Output colour cache holds; then
+  // everything drawn once more, so every block has been coloured or found pushed out
+  const seen = standInForClaudeCode(on)
+  const handles: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void> }> = []
+  for (let n = 0; n < 201; n++) {
+    handles.push(await $.ui.mount(commandRow(`call-many-${n}`, `cat notes-${n}.md`)))
+    handles.push(await $.ui.mount(outputBlock(`call-many-${n}`, { stdout: `# Notes ${n}\n`, stderr: '', interrupted: false, isImage: false })))
+  }
+  for (const handle of handles) await handle.redraw()
+  const workersBefore = seen.workerInputs.length
+
+  // Act: every row is drawn again, as a resize or a scroll back draws it
+  for (const handle of handles) await handle.redraw()
+
+  // Assert
+  expect(seen.workerInputs.length - workersBefore).toBe(0)
+  for (const handle of handles) await handle.unmount()
+})
+
+test('a stderr holding only Claude Code\'s sandbox-violations report draws no "(No output)" row of Claude Code\'s under the coloured output', async ($, on) => {
+  // Arrange: Claude Code appends this report to stderr and takes it out again before drawing
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-27', 'cat notes.md'))
+  const output = { stdout: '# Notes\n', stderr: '\n<sandbox_violations>\nnetwork: example.com denied\n</sandbox_violations>', interrupted: false, isImage: false }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-27', output))
+  await block.redraw()
+
+  // Assert: the coloured block alone, and Claude Code never asked to draw an emptied result
+  const texts = (await block.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('# Notes')
+  expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
+  expect(seen.drawnByClaudeCode.filter(drawn => drawn.stdout === '')).toEqual([])
+  await block.unmount()
+  await row.unmount()
 })

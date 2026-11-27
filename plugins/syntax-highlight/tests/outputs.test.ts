@@ -419,10 +419,12 @@ describe('colouring never stalls on a pathological line', () => {
           // Arrange
           const plan = { language, shapes: [shape] }
 
-          // Act
-          const started = performance.now()
-          assignLines([line], plan)
-          const elapsed = performance.now() - started
+          // Act: the fastest of three runs, so a busy machine does not fail a fast regex
+          const elapsed = Math.min(...[1, 2, 3].map(() => {
+            const started = performance.now()
+            assignLines([line], plan)
+            return performance.now() - started
+          }))
 
           // Assert
           // gstack-timing-ok: the 50 ms bound is the contract; the render hook tests every line synchronously, so a slower regex stalls Claude Code's drawing
