@@ -428,6 +428,8 @@ test('grep hits in a file or folder with a space in its name that the command gr
   const cases = [
     { command: 'grep -Hn deploy "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:12:deploy', '# Guide', '12: items'] },
     { command: 'grep -rn deploy "docs/my notes"; cat guide.md', lines: ['docs/my notes/a.md:3:deploy', '# Guide', '12: items'] },
+    // the pattern given with -e and a context value before the file
+    { command: 'grep -n -A 2 -e "release notes" "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:x', '# Guide', 'release notes:12: deploy'] },
   ]
 
   for (const { command, lines } of cases) {
@@ -437,6 +439,18 @@ test('grep hits in a file or folder with a space in its name that the command gr
     // Assert: a bare `12:` row stays Markdown
     expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
   }
+})
+
+test('a Markdown line that opens with the grep pattern (release notes:12:) stays Markdown, as the pattern is no file', () => {
+  // Arrange: the pattern has a space, and the file grepped does not
+  const command = "grep -n 'release notes' src/app.ts; cat guide.md"
+  const lines = ['release notes:12: deploy', '# Guide']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual([BLOCK, BLOCK])
 })
 
 test('a GNU wc count of a file named after -- (a name that opens with -) keeps its colours, and the file after it opens with its frontmatter', () => {

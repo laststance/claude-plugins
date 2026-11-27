@@ -10,7 +10,7 @@ import { lex, programOf } from './shell.mjs'
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
  * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
- * @property {string[]} grepped - The files and folders with a space in their name the command gave a grep.
+ * @property {string[]} grepped - The files and folders with a space in their name a grep in the command searches.
  */
 
 // ---------- Output shapes ----------
@@ -304,7 +304,7 @@ export const planOutput = (command, output) => {
       // wc's own flags take no value, so every other word is a file it counts
       if (program.name === 'wc') counted.push(...operandsOf(program.args))
       // a grep's hits name its files, and the strong form takes no name with a space: those the command gave it are known
-      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...operandsOf(program.args).filter(arg => /\s/.test(arg)))
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => /\s/.test(arg)))
       fed = languageOf(program, fed)
     }
     // the last stage of a pipeline prints; a silent command prints nothing
@@ -398,6 +398,44 @@ const operandsOf = args => {
   const end = args.indexOf('--')
   const before = end === -1 ? args : args.slice(0, end)
   return [...before.filter(arg => !arg.startsWith('-')), ...(end === -1 ? [] : args.slice(end + 1))]
+}
+
+// grep, rg and ag flags that take the next word as their value; of those, -e and -f give the pattern
+const GREP_VALUE_FLAGS = new Set(['-e', '-f', '-A', '-B', '-C', '-m', '-g', '-t', '-T', '--regexp', '--file', '--after-context', '--before-context', '--context', '--max-count', '--glob', '--iglob', '--type', '--type-not', '--include', '--exclude', '--exclude-dir'])
+
+/**
+ * The files and folders a grep searches: its words that are not flags, flag values or the pattern.
+ *
+ * The pattern is the value of `-e` or `-f` (alone, joined as `-efoo` or `--regexp=foo`, or last in a group such as
+ * `-ne`), else the first word that is no flag; `--` ends the flags. Called by {@link planOutput}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns the searched names, in order
+ * @example
+ * searchedOf({ name: 'grep', args: ['-n', 'release notes', 'src/app.ts'] }) // => ['src/app.ts']
+ */
+const searchedOf = program => {
+  // git grep's words start after its subcommand
+  const args = program.name === 'git' ? program.args.slice(program.args.indexOf('grep') + 1) : program.args
+  const words = []
+  let hasPatternFlag = false
+  for (let k = 0; k < args.length; k++) {
+    const arg = args[k]
+    if (arg === '--') {
+      words.push(...args.slice(k + 1))
+      break
+    }
+    const takesPatternNext = arg === '-e' || arg === '-f' || arg === '--regexp' || arg === '--file' || /^-[A-Za-z]+[ef]$/.test(arg)
+    if (takesPatternNext || /^-[ef]./.test(arg) || /^--(regexp|file)=/.test(arg)) hasPatternFlag = true
+    // a flag's value is no searched name
+    if (takesPatternNext || GREP_VALUE_FLAGS.has(arg)) {
+      k++
+      continue
+    }
+    if (!arg.startsWith('-')) words.push(arg)
+  }
+  // without -e or -f, the first word is the pattern
+  return hasPatternFlag ? words : words.slice(1)
 }
 
 /**
