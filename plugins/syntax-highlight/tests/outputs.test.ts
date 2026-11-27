@@ -11,7 +11,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '# Pitfalls from real runs')
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: [] })
+    expect(plan).toEqual({ language: 'md', shapes: [], counted: [] })
   })
 
   test('a file printed through head keeps the file\'s Language', () => {
@@ -94,7 +94,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '{\n  "CFBundleName" => "Grok Bot"\n}')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['plutil'] })
+    expect(plan).toEqual({ language: null, shapes: ['plutil'], counted: [] })
   })
 })
 
@@ -120,7 +120,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'] })
+    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [] })
     expect(scopes).toEqual([
       null,
       'text.output.grep',
@@ -144,7 +144,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['wc'] })
+    expect(plan).toEqual({ language: 'md', shapes: ['wc'], counted: ['*.md'] })
     expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK, BLOCK])
   })
 
@@ -195,7 +195,7 @@ describe('Output shapes in an Output block', () => {
     const plan = planOutput(unknownCommand, 'src/a.ts:12:const a = 1')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS })
+    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS, counted: [] })
   })
 })
 
@@ -272,7 +272,7 @@ describe('Output shapes inside a Language block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'] })
+    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'], counted: [] })
     expect(scopes).toEqual(new Array(42).fill(BLOCK))
   })
 
@@ -312,16 +312,16 @@ describe('Output shapes inside a Language block', () => {
     expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK, 'text.output.wc', 'text.output.wc'])
   })
 
-  test('a wc count right-aligned in 8 columns keeps its colours before a file name with a space, while a number followed by wide spacing stays Markdown', () => {
+  test('a wc count right-aligned in 8 columns keeps its colours before a file name with a space, while a number followed by wide spacing, or a second number ending in column 8, stays Markdown', () => {
     // Arrange
     const command = 'wc -l "release notes.md" && cat "release notes.md"'
-    const lines = ['       6 release notes.md', '      12', '2       **attempts**', '# Release notes']
+    const lines = ['       6 release notes.md', '      12', '2       **attempts**', '1      2 **pending**', '# Release notes']
 
     // Act
     const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
 
     // Assert
-    expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK])
+    expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK, BLOCK])
   })
 
   test('a Markdown line opening with status letters stays Markdown when the command also ran git status, while the status rows keep their colours', () => {
@@ -399,6 +399,18 @@ describe('Output shapes inside a Language block', () => {
   })
 })
 
+test('a GNU wc count before the name of a file the command counted keeps its colours, so the file after it opens with its frontmatter', () => {
+  // Arrange: GNU wc writes a lone file's count unpadded, and the name has a space
+  const command = 'wc -l "release notes.md" && cat "release notes.md"'
+  const lines = ['7 release notes.md', '---', 'title: Release', '---', '', '2 release notes']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert: a count before a name wc was not given stays Markdown
+  expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK, BLOCK, BLOCK])
+})
+
 describe('colouring never stalls on a pathological line', () => {
   /** A line of 200,000 characters (the colouring cap): `lead`, then `unit` repeated, then `end`. */
   const fill = (unit: string, lead = '', end = '') =>
@@ -417,7 +429,7 @@ describe('colouring never stalls on a pathological line', () => {
       for (const language of [null, 'md']) {
         for (const { label, line } of LINES) {
           // Arrange
-          const plan = { language, shapes: [shape] }
+          const plan = { language, shapes: [shape], counted: ['release notes.md'] }
 
           // Act: the fastest of three runs, so a busy machine does not fail a fast regex
           const elapsed = Math.min(...[1, 2, 3].map(() => {

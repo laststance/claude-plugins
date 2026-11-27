@@ -9,6 +9,7 @@ import { lex, programOf } from './shell.mjs'
  * @property {string | null} language - Language of the whole block, as a language id or file extension the worker
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
+ * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
  */
 
 // ---------- Output shapes ----------
@@ -106,11 +107,12 @@ const SHAPES = [
     id: 'wc',
     // `wc -l a b`: counts, then the name (`total` for the sum)
     programs: ['wc'],
-    // a count ending in column 8, as BSD wc pads it, before any name (`release notes.md` too), or counts before a
+    // a first count whose spaces and digits fill exactly 8 columns, as BSD wc pads it (` %7d`), before any name
+    // (`release notes.md` too), or counts before a
     // path-like name or `total`; a count indented less and followed by a word (`  3 items`) is prose. The name is read
     // with [^\n] and not `.`, which stops at a \r or U+2028 a line can hold and makes the counts before it backtrack
     // quadratically
-    strong: /^(?:(?=[ \d]{7}\d(?:\s|$)) *\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
+    strong: /^(?:(?=(?: {7}\d| {6}\d{2}| {5}\d{3}| {4}\d{4}| {3}\d{5}| {2}\d{6}| \d{7}| \d{8,})(?:\s|$)) *\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
     // any line of counts and text, which `2 deployments failed` also is
     weak: /^\s*\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?$/,
     patterns: [
@@ -281,16 +283,19 @@ const languageOf = (program, fed) => {
  */
 export const planOutput = (command, output) => {
   const segments = command.trim() === '' ? [] : lex(command)
-  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS }
+  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [] }
 
   const names = new Set()
   const printed = new Set()
+  const counted = []
   let fed = null
   for (const seg of segments) {
     const program = programOf(seg)
     const isPiped = seg.op === '|' || seg.op === '|&'
     if (program !== null) {
       for (const name of namesOf(program)) names.add(name)
+      // wc's own flags take no value, so every other word is a file it counts
+      if (program.name === 'wc') counted.push(...program.args.filter(arg => !arg.startsWith('-')))
       fed = languageOf(program, fed)
     }
     // the last stage of a pipeline prints; a silent command prints nothing
@@ -303,7 +308,52 @@ export const planOutput = (command, output) => {
   const languages = [...printed].filter(lang => lang !== null)
   const language = languages.length === 1 ? languages[0] : languages.length === 0 ? sniffJson(output) : null
   const shapes = SHAPES.filter(shape => shape.programs.some(name => names.has(name))).map(shape => shape.id)
-  return { language, shapes }
+  return { language, shapes, counted }
+}
+
+/**
+ * Whether the command prints its Language's text more than once with another program's Output-shape rows between the
+ * prints (`head -n 1 a.ts; git status --short; cat b.ts`).
+ *
+ * The worker then starts the Language's grammar afresh after such rows, since each later print is a file of its own:
+ * the first file's state (an open comment) must not run into it, and its frontmatter must open it. With one print, a
+ * row of a shape inside it is the file's own text (an example in a fenced block), so the state runs on across it.
+ * Called by tokenize.mjs.
+ *
+ * @param command - The shell command the Bash call ran, or '' when unknown.
+ * @returns true when a print of another program's Output shapes sits between two prints of the Language
+ * @example
+ * readsApart('cat a.md; wc -l b.md; cat b.md') // => true
+ * readsApart('wc -l *.md && cat guide.md') // => false
+ */
+export const readsApart = command => {
+  const segments = command.trim() === '' ? [] : lex(command)
+  const shapePrograms = new Set(SHAPES.flatMap(shape => shape.programs))
+  let hasPrintedLanguage = false
+  let hasShapesSince = false
+  let fed = null
+  let names = []
+  for (const seg of segments) {
+    const program = programOf(seg)
+    if (program !== null) {
+      fed = languageOf(program, fed)
+      names.push(...namesOf(program))
+    }
+    // only the last stage of a pipeline prints
+    if (seg.op === '|' || seg.op === '|&') continue
+    const prints = program !== null && !SILENT.has(program.name)
+    if (prints && fed !== null) {
+      // the Language printed again after another program's rows: a file of its own
+      if (hasPrintedLanguage && hasShapesSince) return true
+      hasPrintedLanguage = true
+      hasShapesSince = false
+    } else if (prints && names.some(name => shapePrograms.has(name))) {
+      hasShapesSince = hasPrintedLanguage
+    }
+    fed = null
+    names = []
+  }
+  return false
 }
 
 /** Blocks past this size are not parsed to see whether they are JSON. */
@@ -320,6 +370,25 @@ const sniffJson = output => {
 
 /** What {@link assignLines} gives a line drawn in the block's Language. */
 export const BLOCK = 'block'
+
+// counts, then a name; the name is read with [^\n], not `.`, which stops at a \r or U+2028 and makes the counts backtrack
+const COUNTS_THEN_NAME = /^\s*\d+(?:\s+\d+)*\s+(\S[^\n]*)$/
+
+/**
+ * Whether a line is wc's row for a file the command gave it: counts, then that file's name as written.
+ *
+ * GNU wc writes a lone file's count unpadded (`7 release notes.md`), which the `wc` shape's strong form does not take
+ * when the name has a space or no `.` or `/` (prose looks the same). The command naming the file tells them apart.
+ * Called by {@link assignLines}.
+ *
+ * @param line - A line of the block.
+ * @param counted - The files the command gave `wc`, from {@link planOutput}.
+ * @returns true when the line counts one of those files
+ * @example
+ * isCountOf('7 release notes.md', new Set(['release notes.md'])) // => true
+ * isCountOf('7 release notes', new Set(['release notes.md'])) // => false
+ */
+const isCountOf = (line, counted) => counted.size > 0 && counted.has(COUNTS_THEN_NAME.exec(line)?.[1] ?? '')
 
 /**
  * Gives each line of an Output block what colours it: the first Output shape of the plan it has, else the block's
@@ -342,8 +411,9 @@ export const assignLines = (lines, plan) => {
   const shapes = plan.shapes.map(id => SHAPE_BY_ID.get(id)).filter(Boolean)
   // with a Language, only rows nothing but the command prints take a shape; prose stays in the Language
   const isStrongOnly = plan.language !== null
+  const counted = new Set(plan.counted ?? [])
   return lines.map(line => {
-    const shape = shapes.find(s => s.strong.test(line) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
+    const shape = shapes.find(s => s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted)) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
     if (shape) return shapeScope(shape.id)
     return plan.language === null ? null : BLOCK
   })

@@ -194,7 +194,10 @@ test('plain coloured output, and output whose only extra is a persisted-output n
   for (const block of [plainBlock, persistedBlock, ...rows]) await block.unmount()
 })
 
-test('a result with nothing to colour, an interrupt, an image, a background task, an exit code\'s explanation or a first line past the colouring cap is drawn by Claude Code as it is', async ($, on) => {
+// Value: protects=a Bash result whose stdout is not a string, or is null, is left to Claude Code untouched; fails_when=the stdout type guard in colourableResult is removed and the ToolResult hook throws or draws a block;
+//   why_new=this table covered empty, interrupted, image, background and capped results, not a malformed record; seam=none;
+//   no_claim=real Claude Code drawing (stand-in draws a Text; worker answers red for every line)
+test('a result with nothing to colour, an interrupt, an image, a background task, an ANSI colour or a first line past the colouring cap is drawn by Claude Code as it is', async ($, on) => {
   // Arrange
   const seen = standInForClaudeCode(on)
   const cases = [
@@ -202,8 +205,13 @@ test('a result with nothing to colour, an interrupt, an image, a background task
     { id: 'call-7', output: { stdout: '# Notes\n', stderr: '', interrupted: true, isImage: false } },
     { id: 'call-15', output: { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: true } },
     { id: 'call-16', output: { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false, backgroundTaskId: 'b1' } },
-    { id: 'call-13', output: { stdout: 'no matches\n', stderr: '', interrupted: false, isImage: false, returnCodeInterpretation: 'No matches found' } },
+    // an ESC, which a drawn Text refuses
+    { id: 'call-13', output: { stdout: '# Notes\n\u001b[31mfailed\u001b[0m\n', stderr: '', interrupted: false, isImage: false } },
     { id: 'call-8', output: { stdout: `${'x'.repeat(200_001)}\n# Notes\n`, stderr: '', interrupted: false, isImage: false } },
+    // a record with no usable stdout: a number, no field at all, or no record
+    { id: 'call-30', output: { stdout: 42, stderr: '', interrupted: false, isImage: false } },
+    { id: 'call-31', output: { stderr: CWD_NOTICE, interrupted: false, isImage: false } },
+    { id: 'call-32', output: null as unknown as Record<string, unknown> },
   ]
 
   for (const { id, output } of cases) {
@@ -471,4 +479,264 @@ test('a stderr holding only Claude Code\'s sandbox-violations report draws no "(
   expect(seen.drawnByClaudeCode.filter(drawn => drawn.stdout === '')).toEqual([])
   await block.unmount()
   await row.unmount()
+})
+
+// Value: protects=a Bash call that ends in an error result starts no colouring worker for its Output block and is returned unchanged;
+//   fails_when=the isError check in the tool.call hook is dropped and an error's stdout is coloured as an Output block;
+//   why_new=the pre-colour test returns only successful and interrupted results; seam=none;
+//   no_claim=real Claude Code error rows (the stand-in returns a canned error record)
+test('a Bash call that fails is returned as it is, with no Output block coloured for its error text', async ($, on) => {
+  // Arrange
+  const seen = standInForClaudeCode(on)
+  on('tool.call', () => ({ result: { stdout: MEMORY_STDOUT, stderr: '', interrupted: false, isImage: false }, isError: true }) as never)
+
+  // Act
+  await $.tool.call({ tool: 'Bash', command: MEMORY_COMMAND, tool_use_id: 'call-40' } as never)
+
+  // Assert: the command is coloured on its way in, the error's text never is
+  expect(seen.workerInputs.filter(asked => typeof asked.output === 'string')).toHaveLength(0)
+  expect(seen.workerInputs.filter(asked => asked.command === MEMORY_COMMAND)).toHaveLength(1)
+})
+
+test('a result holding an ANSI colour and a cwd notice is drawn by Claude Code whole, its stdout kept', async ($, on) => {
+  // Arrange: an ESC, which a drawn Text refuses, and a sibling row for Claude Code to draw
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-43', 'cd /tmp/build; cat build.log'))
+  const output = { stdout: '# Build\n\u001b[31mfailed\u001b[0m\n', stderr: CWD_NOTICE, interrupted: false, isImage: false }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-43', output))
+  await block.redraw()
+
+  // Assert: Claude Code draws the record as it is, stdout and all, and no worker colours the block
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect(seen.drawnByClaudeCode.at(-1)).toEqual(output)
+  expect(seen.workerInputs.filter(input => 'output' in input)).toEqual([])
+  for (const handle of [block, row]) await handle.unmount()
+})
+
+test('an expanded block with more rows than one drawing holds, and a cwd notice, is drawn by Claude Code whole, its stdout kept', async ($, on) => {
+  // Arrange: 8,000 short lines take three nodes each, past the 20,000 the engine draws in one tree
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-44', 'cd /tmp/ids; cat ids.md'))
+  const stdout = `${Array.from({ length: 8000 }, (_, n) => `id ${n}`).join('\n')}\n`
+  const output = { stdout, stderr: CWD_NOTICE, interrupted: false, isImage: false }
+  const collapsed = await $.ui.mount({ ...outputBlock('call-44', output, false), requestId: 'call-44-collapsed' })
+  await collapsed.redraw()
+
+  // Act
+  const expanded = await $.ui.mount(outputBlock('call-44', output, true))
+  await expanded.redraw()
+
+  // Assert: expanded, Claude Code draws the record as it is; collapsed, the few rows of the fold stay coloured
+  expect((await expanded.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect(seen.drawnByClaudeCode.at(-1)).toEqual(output)
+  expect((await collapsed.findAll({ type: 'Text' })).map(t => t.text)).toContain('id 0')
+  for (const handle of [expanded, collapsed, row]) await handle.unmount()
+})
+
+test('a diff -u that exits 1 because the files differ has its diff coloured', async ($, on) => {
+  // Arrange: Claude Code explains the exit code, which it shows only for an empty stdout
+  standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-46', 'diff -u old.md new.md'))
+  const output = { stdout: '--- old.md\n+++ new.md\n@@ -1 +1 @@\n-draft\n+final\n', stderr: '', interrupted: false, isImage: false, returnCodeInterpretation: 'Files differ' }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-46', output))
+  await block.redraw()
+
+  // Assert
+  const texts = (await block.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('--- old.md')
+  expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
+  for (const handle of [block, row]) await handle.unmount()
+})
+
+test('under a coloured diff that exits 1 after a cd, Claude Code draws the cwd notice without the exit code\'s explanation', async ($, on) => {
+  // Arrange
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-47', 'cd /tmp/site && diff -u old.md new.md'))
+  const output = { stdout: '--- old.md\n+++ new.md\n@@ -1 +1 @@\n-draft\n+final\n', stderr: CWD_NOTICE, interrupted: false, isImage: false, returnCodeInterpretation: 'Files differ' }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-47', output))
+  await block.redraw()
+
+  // Assert: the record Claude Code draws the sibling rows from has no stdout and no explanation
+  expect(seen.drawnByClaudeCode.at(-1)).toEqual({ stdout: '', stderr: CWD_NOTICE, interrupted: false, isImage: false })
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toContain('+final')
+  for (const handle of [block, row]) await handle.unmount()
+})
+
+test('an expanded block taller than the main screen that Claude Code drew first stays as drawn once its colours are back, so none of its rows are doubled', async ($, on) => {
+  // Arrange: blocks drawn before their colours are back, as in a resumed session: 40 lines and 5 lines on a 24-row main
+  // screen, and 40 lines on a fullscreen one, which redraws all of itself
+  standInForClaudeCode(on)
+  const mainScreen = { columns: 80, rows: 24, isFullscreen: false }
+  const fullscreen = { columns: 80, rows: 24, isFullscreen: true }
+  const list = (count: number) => ({ stdout: `${Array.from({ length: count }, (_, n) => `- item ${n}`).join('\n')}\n`, stderr: '', interrupted: false, isImage: false })
+  const rows = [
+    await $.ui.mount({ ...commandRow('call-48', 'cat list.md'), viewport: mainScreen }),
+    await $.ui.mount({ ...commandRow('call-49', 'cat list.md'), viewport: mainScreen }),
+    await $.ui.mount({ ...commandRow('call-50', 'cat list.md'), viewport: fullscreen }),
+  ]
+  const tall = await $.ui.mount({ ...outputBlock('call-48', list(40), true), viewport: mainScreen })
+  const short = await $.ui.mount({ ...outputBlock('call-49', list(5), true), viewport: mainScreen })
+  const tallInFullscreen = await $.ui.mount({ ...outputBlock('call-50', list(40), true), viewport: fullscreen })
+
+  // Act: every block is drawn again with its colours back
+  for (const block of [tall, short, tallInFullscreen]) await block.redraw()
+
+  // Assert: only the tall block on the main screen stays as Claude Code drew it
+  expect((await tall.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await short.findAll({ type: 'Text' })).map(t => t.text)).toContain('- item 0')
+  expect((await tallInFullscreen.findAll({ type: 'Text' })).map(t => t.text)).toContain('- item 0')
+  for (const handle of [tall, short, tallInFullscreen, ...rows]) await handle.unmount()
+})
+
+test('a subagent\'s Bash call returns at once, with no colours made for rows this transcript does not draw as it ends', async ($, on) => {
+  // Arrange: a worker and a wait that record being asked
+  const workerInputs: string[] = []
+  const waits: number[] = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', (_, e) => {
+    workerInputs.push(String(e.init?.stdin ?? ''))
+    const lines = [[{ t: '# Notes', fg: '#ff0000', b: false, i: false, u: false }]]
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', (_, e) => {
+    waits.push(e.ms)
+
+    return { value: undefined }
+  })
+  on('tool.call', () => ({ result: { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false } }))
+
+  // Act
+  const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-45', agentId: 'agent-research' } as never)
+
+  // Assert: the result came back with no worker started and no wait
+  expect((done as { result?: { stdout?: string } }).result?.stdout).toBe('# Notes\n')
+  expect(workerInputs).toEqual([])
+  expect(waits).toEqual([])
+})
+
+test('a row drawn while every colouring worker is busy is coloured before rows that waited longer', { timeoutMs: 30_000 }, async ($, on) => {
+  // Arrange: a worker that takes a real 50 ms and records the commands in the order it starts them
+  const started: string[] = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    started.push(String(asked.command ?? ''))
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+    const lines = [[{ t: String(asked.command ?? ''), fg: '#ff0000', b: false, i: false, u: false }]]
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  const rows: Array<{ unmount: () => Promise<void> }> = []
+
+  // Act: five rows take the four workers and one place in line, then a sixth is drawn
+  for (let n = 1; n <= 6; n++) rows.push(await $.ui.mount(commandRow(`call-queue-${n}`, `cat queue-${n}.md`)))
+  await new Promise(resolve => setTimeout(() => resolve(undefined), 400))
+
+  // Assert: the sixth started before the fifth
+  expect(started).toEqual(['cat queue-1.md', 'cat queue-2.md', 'cat queue-3.md', 'cat queue-4.md', 'cat queue-6.md', 'cat queue-5.md'])
+  for (const handle of rows) await handle.unmount()
+})
+
+test('two drawings of one call with different text (its record before and after a rewrite) settle without starting workers in turn', async ($, on) => {
+  // Arrange: the same call drawn twice at once, as recorded and as another mod rewrote it for one view
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-41', 'cat notes.md'))
+  const recorded = await $.ui.mount(outputBlock('call-41', { stdout: '# Notes\nAPI_TOKEN=abc123\n', stderr: '', interrupted: false, isImage: false }))
+  const rewritten = await $.ui.mount({ ...outputBlock('call-41', { stdout: '# Notes\nAPI_TOKEN=•••\n', stderr: '', interrupted: false, isImage: false }), requestId: 'call-41-rewritten' })
+  for (const handle of [recorded, rewritten, recorded, rewritten]) await handle.redraw()
+  const workersBefore = seen.workerInputs.length
+
+  // Act: both are drawn again, as every redraw draws them
+  for (const handle of [recorded, rewritten, recorded, rewritten]) await handle.redraw()
+
+  // Assert: no further worker, and each drawing shows its own text
+  expect(seen.workerInputs.length - workersBefore).toBe(0)
+  expect((await recorded.findAll({ type: 'Text' })).map(t => t.text)).toContain('API_TOKEN=abc123')
+  expect((await rewritten.findAll({ type: 'Text' })).map(t => t.text)).toContain('API_TOKEN=•••')
+  for (const handle of [rewritten, recorded, row]) await handle.unmount()
+})
+
+test('many coloured rows drawn together (a resumed session) run at most four colouring workers at once', { timeoutMs: 30_000 }, async ($, on) => {
+  // Arrange: a worker that takes a real 50 ms and counts how many run at once; 12 command rows and their blocks ask for
+  // 24 colourings
+  let running = 0
+  let mostAtOnce = 0
+  let served = 0
+  let allServed: () => void = () => {}
+  const everyColouringServed = new Promise<void>(resolve => (allServed = resolve))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    running++
+    mostAtOnce = Math.max(mostAtOnce, running)
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+    running--
+    served++
+    if (served === 24) allServed()
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    const text = String(asked.output ?? asked.command ?? '')
+    const lines = text.split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return {
+      value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const handles: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void>; findAll: (q: { type: string }) => Promise<Array<{ text: string }>> }> = []
+
+  // Act
+  for (let n = 0; n < 12; n++) {
+    handles.push(await $.ui.mount(commandRow(`call-burst-${n}`, `cat burst-${n}.md`)))
+    handles.push(await $.ui.mount(outputBlock(`call-burst-${n}`, { stdout: `# Burst ${n}\n`, stderr: '', interrupted: false, isImage: false })))
+  }
+  await everyColouringServed
+  for (const handle of handles) await handle.redraw()
+
+  // Assert: four at once at most, and every block was coloured in the end
+  expect(mostAtOnce).toBe(4)
+  for (let n = 0; n < 12; n++) expect((await handles[2 * n + 1]!.findAll({ type: 'Text' })).map(t => t.text)).toContain(`# Burst ${n}`)
+  for (const handle of handles) await handle.unmount()
+})
+
+// last in this file: its worker never answers and keeps two worker slots for the rest of the run
+test('a Bash call whose colours are not back within 1.5 s returns its result then, without waiting for the worker', async ($, on) => {
+  // Arrange: the worker never answers; the wait's timer fires at once and records how long it was asked to wait
+  const waits: number[] = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', () => new Promise<never>(() => {}))
+  on('clock.sleep', (_, e) => {
+    waits.push(e.ms)
+
+    return { value: undefined }
+  })
+  on('tool.call', () => ({ result: { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false } }))
+
+  // Act
+  const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-42' } as never)
+
+  // Assert: the call returned its own result, after the 1.5 s wait it promises
+  expect((done as { result?: { stdout?: string } }).result?.stdout).toBe('# Notes\n')
+  expect(waits).toEqual([1500])
 })

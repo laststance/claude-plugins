@@ -33,10 +33,22 @@ type Colourable = { stdout: string; hasSiblings: boolean }
 const SHOW_CODE = 'mcp__syntax-highlight__show_code'
 const DIM_TO = '#999999'
 const MAX_CACHED = 200
-// Calls and commands kept track of: each call's command, whether its result waits for it, whether its Output block's
-// colours were pushed out, and each command's colours. All small, so far more than MAX_CACHED: one forgotten while its
-// row is still drawn would be coloured again on every redraw, without end, once more rows are drawn than this keeps
+// Calls kept track of: each call's command, whether its result waits for it, and whether its rows were coloured once.
+// A short string or a flag each, so far more than MAX_CACHED: a call forgotten while its rows are still drawn would be
+// coloured again on every redraw, without end, once more rows are drawn than this keeps
 const MAX_CALLS = 20_000
+// At most this many colouring workers run at once: a resumed session draws many rows together, and each worker is a
+// node process that loads the grammars
+const MAX_WORKERS = 4
+// The nodes an Output block's rows may take in one drawn tree. The engine refuses a tree past 20,000 (index.d.ts,
+// ClientElements), and the rest of this one (the ⎿, the fold, the sibling rows) takes a few more. An expanded block
+// past it (some 5,000 short lines, or fewer with many colours each) is drawn by Claude Code
+const MAX_DRAWN_NODES = 15_000
+// The rows Claude Code keeps on the main screen below the transcript: the prompt box, its hints and the status line
+const PROMPT_ROWS = 8
+// characters a drawn Text refuses: the C0 controls but tab, newline and carriage return, DEL and C1 (an ANSI colour's
+// ESC). A tree holding one is refused whole
+const REFUSED_IN_TEXT = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/
 // An Output block is coloured up to this many lines or characters; the rest is drawn as it is
 const MAX_OUTPUT_LINES = 2000
 const MAX_OUTPUT_CHARS = 200_000
@@ -48,10 +60,17 @@ const FOLD_INDENT = 10
 
 // the colours of commands and snippets, by their text
 const cache = new Map<string, Colours>()
+// command and snippet rows drawn in colour, by call: one whose colours were pushed out of `cache` since is drawn by
+// Claude Code rather than coloured again, so redrawing more rows than `cache` holds cannot start workers without end
+const colouredRows = new Map<string, true>()
+// calls whose expanded Output block Claude Code drew first and the main screen cannot redraw whole (see
+// isTooTallToRedraw): the block stays as Claude Code drew it while expanded
+const keptAsDrawn = new Map<string, true>()
 // the colours of Output blocks, per call and plan, each with the text it was made from: a lookup for any other text
 // misses (another mod can rewrite a call's record after the tool.call hook coloured it, as secret-guard masks secrets),
-// and the key stays short
-const outputColours = new Map<string, { source: string; colours: Colours }>()
+// and the key stays short. Two versions are kept, so two drawings of one call's text (the record before and after a
+// rewrite, two surfaces) do not push each other out and start workers in turn
+const outputColours = new Map<string, Array<{ source: string; colours: Colours }>>()
 // Output blocks whose colours were made and then pushed out of a full outputColours: Claude Code draws them as they
 // are, as colouring one again would push out another, and with more blocks drawn than it holds every redraw would start
 // workers without end
@@ -113,7 +132,7 @@ const coloursOf = (payload: Payload): Colours | undefined => {
   const key = outputKey(payload)
   const kept = outputColours.get(key)
   // colours of the same call and plan made from other text (the record before another mod rewrote it) are no answer
-  if (kept !== undefined) return kept.source === payload.output ? kept.colours : undefined
+  if (kept !== undefined) return kept.find(version => version.source === payload.output)?.colours
   // coloured once and pushed out since: Claude Code draws it, so redrawing many blocks cannot start workers forever
   return pushedOut.has(key) ? 'plain' : undefined
 }
@@ -121,15 +140,38 @@ const coloursOf = (payload: Payload): Colours | undefined => {
 /** Caches a payload's colours where {@link coloursOf} finds them. Called by {@link highlight}. */
 const keepColours = (payload: Payload, colours: Colours) => {
   if ('output' in payload) {
-    remember(outputColours, outputKey(payload), { source: payload.output, colours }, MAX_CACHED, key => remember(pushedOut, key, true, MAX_CALLS))
+    const key = outputKey(payload)
+    // this text's version replaces its older self; of the other versions, the newest stays
+    const others = (outputColours.get(key) ?? []).filter(version => version.source !== payload.output)
+    remember(outputColours, key, [...others.slice(-1), { source: payload.output, colours }], MAX_CACHED, pushed => remember(pushedOut, pushed, true, MAX_CALLS))
   } else {
-    // a command's colours are small: as many are kept as calls, so a long session's rows never take turns being coloured
-    remember(cache, keyOf(payload), colours, MAX_CALLS)
+    remember(cache, keyOf(payload), colours)
   }
 }
 
 // whether any run of a result has a colour or a style
 const isColoured = (result: Result) => result.lines.some(runs => runs.some(r => r.fg !== null || r.b || r.i || r.u))
+
+let workersRunning = 0
+// highlights waiting for a worker slot, the newest first: in a resumed session the rows drawn last are the ones the
+// screen can still redraw, and a call that just returned is waiting for its colours
+const workersWaiting: Array<() => void> = []
+
+/** Takes a worker slot, waiting while {@link MAX_WORKERS} are taken. Called by {@link highlight}. */
+const startWork = (): Promise<void> => {
+  if (workersRunning < MAX_WORKERS) {
+    workersRunning++
+    return Promise.resolve()
+  }
+  return new Promise(go => workersWaiting.push(go))
+}
+
+/** Gives a worker slot back: to the newest highlight waiting for one, else to the pool. Called by {@link highlight}. */
+const endWork = () => {
+  const next = workersWaiting.pop()
+  if (next !== undefined) next()
+  else workersRunning--
+}
 
 /**
  * Colours a payload in the node worker (tokenize.mjs) and caches the lines, then redraws.
@@ -147,6 +189,7 @@ const isColoured = (result: Result) => result.lines.some(runs => runs.some(r => 
  */
 const highlight = async ($: EngineInterface, payload: Payload) => {
   keepColours(payload, 'pending')
+  await startWork()
 
   try {
     // the worker plans an Output block itself; the call id and the hook's plan are only for the cache
@@ -162,6 +205,8 @@ const highlight = async ($: EngineInterface, payload: Payload) => {
   } catch (error) {
     keepColours(payload, 'failed')
     $.ui.log(`syntax-highlight: ${String(error)}`, { to: 'debug' })
+  } finally {
+    endWork()
   }
   $.ui.invalidate('ui.render')
 }
@@ -200,12 +245,14 @@ const shownStderr = (stderr: string) => {
  * "Shell cwd was reset to …" notice, since a command's own stderr is merged into stdout), an edit diff and viewed
  * images. The `ToolResult` hook draws the coloured stdout and lets Claude Code draw those rows beneath it. A
  * persisted-output note alone is not one, nor a stderr holding only Claude Code's sandbox-violations report: for an
- * emptied stdout with nothing else, Claude Code draws "(No output)". Called by the `tool.call` hook (to colour before
- * the first draw) and the `ToolResult` hook.
+ * emptied stdout with nothing else, Claude Code draws "(No output)". Nor is an exit code's explanation (`diff` exiting
+ * 1 for "Files differ"), which Claude Code draws only in place of an empty stdout. Called by the `tool.call` hook (to
+ * colour before the first draw) and the `ToolResult` hook.
  *
  * @param output - The tool's result record.
  * @returns the stdout with its trailing blank space cut and whether sibling rows exist, or null when Claude Code should
- *   draw the whole result (an interrupt, an image, a background task, an exit code's explanation, no stdout)
+ *   draw the whole result (an interrupt, an image, a background task, no stdout, or a character a drawn Text refuses,
+ *   as an ANSI colour's ESC)
  * @example
  * colourableResult({ stdout: 'a\nb\n', stderr: '' }) // => { stdout: 'a\nb', hasSiblings: false }
  * colourableResult({ stdout: 'a', stderr: '\nShell cwd was reset to /x' }) // => { stdout: 'a', hasSiblings: true }
@@ -214,10 +261,12 @@ const shownStderr = (stderr: string) => {
 const colourableResult = (output: unknown): Colourable | null => {
   const out = output as BashOutput | null
   if (out === null || typeof out !== 'object' || typeof out.stdout !== 'string') return null
-  if (out.interrupted === true || out.isImage === true || out.backgroundTaskId || out.returnCodeInterpretation) return null
+  if (out.interrupted === true || out.isImage === true || out.backgroundTaskId) return null
   // trimEnd, not a /\s+$/ replace: that retries from every space of a long run inside the text, quadratic in its length
   const stdout = out.stdout.trimEnd()
-  if (stdout === '') return null
+  // a tree holding a character Text refuses is refused, and with the sibling rows asked for, their drawing would stand
+  // alone with the stdout taken out
+  if (stdout === '' || REFUSED_IN_TEXT.test(stdout)) return null
   const hasStderr = typeof out.stderr === 'string' && shownStderr(out.stderr) !== ''
   const hasImages = Array.isArray(out.viewedImagePaths) && out.viewedImagePaths.length > 0
   return { stdout, hasSiblings: hasStderr || Boolean(out.bashEditDiff) || hasImages }
@@ -273,6 +322,33 @@ const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏�
 const cellsOf = (ch: string) => (WIDE.test(ch) ? 2 : 1)
 
 /**
+ * Whether an expanded Output block on the terminal's main screen is too tall for the screen to redraw whole.
+ *
+ * The main screen cannot rewrite rows that have scrolled off it, so a block Claude Code drew before its colours were
+ * back (a resumed session, a slow worker) and then redrawn in colour would leave the scrolled-off rows of the first
+ * drawing above the new one, doubled. Collapsed, a block takes a few rows; in fullscreen the screen redraws all of
+ * itself. Called by the `ToolResult` hook whenever Claude Code draws a block it colours.
+ *
+ * @param lines - The block's lines.
+ * @param isExpanded - Whether every line is drawn (ctrl+o, verbose), not the fold.
+ * @param viewport - The render event's screen size and kind; absent where no surface has measured.
+ * @returns true when the block's wrapped rows and the prompt below them pass the main screen's height
+ * @example
+ * isTooTallToRedraw(fortyLines, true, { columns: 80, rows: 24, isFullscreen: false }) // => true
+ */
+const isTooTallToRedraw = (lines: string[], isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen?: boolean } | undefined) => {
+  if (!isExpanded || viewport === undefined || viewport.isFullscreen !== false) return false
+  const width = Math.max(viewport.columns - FOLD_INDENT, 10)
+  let rows = PROMPT_ROWS
+  // add each line's wrapped rows, stopping once past the screen
+  for (const line of lines) {
+    rows += Math.max(1, Math.ceil(line.length / width))
+    if (rows > viewport.rows) return true
+  }
+  return false
+}
+
+/**
  * Folds coloured lines the way Claude Code folds a collapsed result: each line broken into rows of the result's
  * width, the first {@link FOLD_ROWS} rows shown, and all four when only one would be left.
  *
@@ -320,6 +396,20 @@ const foldRows = (lines: Run[][], width: number) => {
  * @param scope - The hover scope that brightens the line's runs together.
  * @param dimPlain - Whether uncoloured text is dimmed too (Bash commands: yes; Output blocks: no, they read as text).
  */
+/**
+ * How many nodes an Output block's rows take in a drawn tree: each row is a Text, and each of its runs a Text holding
+ * its text (an empty row, one run of a space), as {@link renderRuns} draws them.
+ *
+ * The `ToolResult` hook checks it against {@link MAX_DRAWN_NODES} before drawing: the engine refuses a tree past its
+ * bound, and Claude Code's drawing then stands in its place.
+ *
+ * @param rows - The rows to be drawn, each a list of runs.
+ * @returns the nodes the rows take
+ * @example
+ * drawnNodes([[{ t: 'a', fg: null, b: false, i: false, u: false }], []]) // => 6
+ */
+const drawnNodes = (rows: Run[][]) => rows.reduce((sum, runs) => sum + 1 + 2 * Math.max(runs.length, 1), 0)
+
 const renderRuns = (Text: any, runs: Run[], strength: number, scope: string, dimPlain = strength < 1) =>
   runs.length === 0
     ? [<Text> </Text>]
@@ -369,8 +459,11 @@ export const register: Register = (on, userOptions) => {
   // colour a Bash call's command as it starts and its Output block as it ends, so both rows are ready when first drawn
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const command = e.command.trimEnd()
-    if (command !== '' && coloursOf({ command }) === undefined) void highlight($, { command })
     remember(commands, e.tool_use_id, command, MAX_CALLS)
+    // a subagent's or teammate's call is not drawn in this transcript as it ends: colouring it now would take workers
+    // and cache places from rows that are, and hold the call up. A drawing of its rows colours them then
+    if (e.agentId !== undefined) return next(e)
+    if (command !== '' && coloursOf({ command }) === undefined) void highlight($, { command })
 
     const done = await next(e)
     const result = 'result' in done && done.result !== undefined && !done.isError ? colourableResult(done.result) : null
@@ -394,45 +487,59 @@ export const register: Register = (on, userOptions) => {
     if (e.props.tool !== 'Bash' || e.props.isErrored) return next(e)
     const result = colourableResult(e.props.output)
     if (result === null) return next(e)
-    // drawn before its command is known (a resumed session draws results first): Claude Code draws it until the ToolUse
-    // hook learns the command and asks for a redraw, so no worker colours it from a guess first
-    if (!commands.has(e.props.tool_use_id)) {
-      remember(waitingForCommand, e.props.tool_use_id, true, MAX_CALLS)
+    const id = e.props.tool_use_id
+    const isExpanded = e.props.isExpanded === true
+    // Claude Code draws the block until its colours are back; an expanded one too tall for the main screen to redraw
+    // whole stays as Claude Code drew it, so no scrolled-off rows of this drawing are left doubled above a coloured one
+    const drawnByClaudeCode = () => {
+      if (isTooTallToRedraw(result.stdout.split('\n'), isExpanded, e.viewport)) remember(keptAsDrawn, id, true, MAX_CALLS)
       return next(e)
     }
+    // drawn before its command is known (a resumed session draws results first): Claude Code draws it until the ToolUse
+    // hook learns the command and asks for a redraw, so no worker colours it from a guess first
+    if (!commands.has(id)) {
+      remember(waitingForCommand, id, true, MAX_CALLS)
+      return drawnByClaudeCode()
+    }
     const { head, rest } = capOutput(result.stdout)
-    const payload = outputPayload(e.props.tool_use_id, head)
+    const payload = outputPayload(id, head)
     if (payload === null) return next(e)
 
     const done = coloursOf(payload)
     if (done === undefined) void highlight($, payload)
-    if (done === undefined || done === 'pending' || done === 'failed' || done === 'plain') return next(e)
+    if (done === undefined || done === 'pending') return drawnByClaudeCode()
+    if (done === 'failed' || done === 'plain' || (isExpanded && keptAsDrawn.has(id))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = `syntax-highlight:out:${e.props.tool_use_id}`
     const plain: Run[][] = rest.map(line => (line === '' ? [] : [{ t: line, fg: null, b: false, i: false, u: false }]))
     const lines = [...done.lines, ...plain]
     // collapsed, the block folds as Claude Code folds it; expanded (ctrl+o, verbose), every line is drawn
-    const isExpanded = e.props.isExpanded === true
     const width = Math.max((e.viewport?.columns ?? 80) - FOLD_INDENT, 10)
     const { rows, hidden } = isExpanded ? { rows: lines, hidden: 0 } : foldRows(lines, width)
+    // a tree past the engine's bound on nodes is refused: Claude Code draws the block instead
+    if (drawnNodes(rows) > MAX_DRAWN_NODES) return next(e)
+    const block = (
+      <Box flexDirection="row">
+        <Text dimColor>{'  ⎿  '}</Text>
+        <Box flexDirection="column">
+          {rows.map(runs => (
+            <Text wrap="wrap" hover={{ scope }}>{renderRuns(Text, runs, options.outputStrength, scope, false)}</Text>
+          ))}
+          {hidden > 0 ? <Text dimColor>{`… +${hidden} line${hidden === 1 ? '' : 's'} (ctrl+o to expand)`}</Text> : null}
+        </Box>
+      </Box>
+    )
     // the sibling rows stay Claude Code's: it draws them for this result with the stdout taken out, and draws nothing
-    // for a result with none ("(No output)"), so it is asked only when there are some
-    const siblings = result.hasSiblings
-      ? await next({ ...e, props: { ...e.props, output: { ...(e.props.output as Record<string, unknown>), stdout: '' } } })
-      : null
+    // for a result with none ("(No output)"), so it is asked only when there are some. It is asked last, once the rest
+    // is drawn, since a hook that fails after asking leaves that answer, stdout taken out, standing. The exit code's
+    // explanation is left out too: Claude Code draws it only in place of an empty stdout, which this one is not
+    const { returnCodeInterpretation: _explanation, ...output } = e.props.output as Record<string, unknown>
+    const siblings = result.hasSiblings ? await next({ ...e, props: { ...e.props, output: { ...output, stdout: '' } } }) : null
 
     return (
       <Box flexDirection="column">
-        <Box flexDirection="row">
-          <Text dimColor>{'  ⎿  '}</Text>
-          <Box flexDirection="column">
-            {rows.map(runs => (
-              <Text wrap="wrap" hover={{ scope }}>{renderRuns(Text, runs, options.outputStrength, scope, false)}</Text>
-            ))}
-            {hidden > 0 ? <Text dimColor>{`… +${hidden} line${hidden === 1 ? '' : 's'} (ctrl+o to expand)`}</Text> : null}
-          </Box>
-        </Box>
+        {block}
         {siblings}
       </Box>
     )
@@ -456,9 +563,12 @@ export const register: Register = (on, userOptions) => {
       : typeof input?.command === 'string' && input.command.trim() !== '' ? { command: input.command.trimEnd() } : null
     if (payload === null) return next(e)
 
-    const done = coloursOf(payload)
+    const row = e.props.tool_use_id === undefined ? null : String(e.props.tool_use_id)
+    // a row coloured before whose colours were pushed out of the cache since: Claude Code draws it
+    const done = coloursOf(payload) ?? (row !== null && colouredRows.has(row) ? 'plain' : undefined)
     if (done === undefined) void highlight($, payload)
     if (done === undefined || done === 'pending' || done === 'failed' || done === 'plain') return next(e)
+    if (row !== null) remember(colouredRows, row, true, MAX_CALLS)
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = `syntax-highlight:${String(e.props.tool_use_id ?? keyOf(payload).length)}`

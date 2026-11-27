@@ -9,7 +9,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 import { detectEditor, findGrammars, norm, readJsonc, readText, resolveTheme } from './editors.mjs'
-import { BLOCK, assignLines, planOutput, shapeGrammars } from './outputs.mjs'
+import { BLOCK, assignLines, planOutput, readsApart, shapeGrammars } from './outputs.mjs'
 import { ASSIGN, WRAPPERS, base, lex } from './shell.mjs'
 
 const require = createRequire(import.meta.url)
@@ -78,19 +78,26 @@ const styleOf = (fg, font) => {
  * @param text - The text, its lines joined by `\n`.
  * @param isSkipped - Lines, by index, left unstyled and never given to the grammar, so its state (an open fence, a
  *   string, a block comment) runs on past them as if they were not there: another command's rows in an Output block.
+ * @param restartsAfterSkip - Whether the first line after skipped ones starts the grammar afresh, as the start of a file
+ *   of its own (the command printed its Language again after another program's rows).
  * @returns one style per character of `text`: null for the default colour, else `{ fg, b, i, u }`
  * @example
  * await tokenizeText('source.ts', 'const a = 1') // => [{ fg: '#569cd6', ... } x5, null, ...]
  */
-const tokenizeText = async (scope, text, isSkipped = () => false) => {
+const tokenizeText = async (scope, text, isSkipped = () => false, restartsAfterSkip = false) => {
   const styles = new Array(text.length).fill(null)
   const grammar = scope ? await grammarFor(scope) : null
   if (!grammar) return styles
   let stack = null
   let offset = 0
+  let isAfterSkip = false
   for (const [n, line] of text.split('\n').entries()) {
     // a skipped line is not tokenized, so it can neither open nor close anything for the lines after it
-    if (!isSkipped(n)) {
+    if (isSkipped(n)) isAfterSkip = true
+    else {
+      // a file of its own starts here: nothing of the text before it carries over, and its frontmatter opens it
+      if (isAfterSkip && restartsAfterSkip) stack = null
+      isAfterSkip = false
       const r = grammar.tokenizeLine2(line, stack)
       stack = r.ruleStack
       for (let k = 0; k < r.tokens.length; k += 2) {
@@ -202,20 +209,24 @@ if (input.output !== undefined) {
   styles = new Array(src.length).fill(null)
   const lines = src.split('\n')
   const plan = planOutput(String(input.command ?? ''), src)
-  const blockScope = plan.language === null ? null : grammarIndex.languages[norm(plan.language)] ?? null
-  // a Language with no grammar (`cat notes.zzunknown`) colours nothing, so the block is read as having none and keeps
-  // every Output shape's colours
+  const indexedScope = plan.language === null ? null : grammarIndex.languages[norm(plan.language)] ?? null
+  // a Language with no grammar (`cat notes.zzunknown`), or one whose grammar does not load, colours nothing, so the
+  // block is read as having none and keeps every Output shape's colours
+  const blockScope = indexedScope !== null && (await grammarFor(indexedScope)) !== null ? indexedScope : null
   const effectivePlan = blockScope === null ? { ...plan, language: null } : plan
   const scopes = assignLines(lines, effectivePlan).map(scope => (scope === BLOCK ? blockScope : scope))
   const firstLanguageLine = blockScope === null ? -1 : scopes.indexOf(blockScope)
   if (firstLanguageLine !== -1) {
     // the Language takes the block in one pass from its first line on, so its state (frontmatter, an open fence) runs
     // on across the Output-shape rows inside it. The pass skips those rows, as another command printed them: a grep hit
-    // holding `/*` must not turn the next file into a comment. They are coloured as their shape below. Rows before that
+    // holding `/*` must not turn the next file into a comment. When the command prints its Language again after such
+    // rows (`cat a.md; wc -l b.md; cat b.md`), the grammar starts afresh after them, so each file opens with its own
+    // frontmatter and no comment of the file before runs into it. The rows are coloured as their shape below. Rows before that
     // first line are another command's output too (`wc -l *.md && cat guide.md`): the pass starts after them, so the
     // file's frontmatter still opens the Language's text
     const start = lines.slice(0, firstLanguageLine).reduce((length, line) => length + line.length + 1, 0)
-    const whole = await tokenizeText(blockScope, src.slice(start), n => scopes[firstLanguageLine + n] !== blockScope)
+    const restartsAfterSkip = readsApart(String(input.command ?? ''))
+    const whole = await tokenizeText(blockScope, src.slice(start), n => scopes[firstLanguageLine + n] !== blockScope, restartsAfterSkip)
     for (let c = 0; c < whole.length; c++) styles[start + c] = whole[c]
   }
   let offset = 0
