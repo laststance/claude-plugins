@@ -553,6 +553,31 @@ test('a Bash call whose id is longer than a hover scope may be (a gateway\'s) ha
   for (const handle of [block, row]) await handle.unmount()
 })
 
+test('a theme colour written in short hex (#fff, as some themes write it) is drawn as a full colour, not a broken one', async ($, on) => {
+  // Arrange: a worker answering with the theme's short-hex white
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', () => {
+    const lines = [[{ t: '# Notes', fg: '#fff', b: false, i: false, u: false }]]
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const row = await $.ui.mount(commandRow('call-52', 'cat notes.md'))
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-52', { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false }))
+  await block.redraw()
+
+  // Assert: white pulled toward grey by the Output blocks' strength (0.75), in six hex digits
+  const colours = (await block.findAll({ type: 'Text' })).map(t => t.props.color).filter(colour => colour !== undefined)
+  expect(colours).toEqual(['#e6e6e6'])
+  for (const handle of [block, row]) await handle.unmount()
+})
+
 test('a diff -u that exits 1 because the files differ has its diff coloured', async ($, on) => {
   // Arrange: Claude Code explains the exit code, which it shows only for an empty stdout
   standInForClaudeCode(on)
@@ -605,16 +630,24 @@ test('an expanded block taller than the main screen that Claude Code drew first 
   rows.push(await $.ui.mount({ ...commandRow('call-51', 'cat 議事録.md'), viewport: mainScreen }))
   const wide = { stdout: `${Array.from({ length: 12 }, () => '議'.repeat(60)).join('\n')}\n`, stderr: '', interrupted: false, isImage: false }
   const tallInWideCharacters = await $.ui.mount({ ...outputBlock('call-51', wide, true), viewport: mainScreen })
+  // the same with emoji from the transport block (🚀), which a terminal also draws two cells wide
+  rows.push(await $.ui.mount({ ...commandRow('call-53', 'cat launches.md'), viewport: mainScreen }))
+  const rockets = { stdout: `${Array.from({ length: 12 }, () => '🚀'.repeat(60)).join('\n')}\n`, stderr: '', interrupted: false, isImage: false }
+  const tallInEmoji = await $.ui.mount({ ...outputBlock('call-53', rockets, true), viewport: mainScreen })
 
-  // Act: every block is drawn again with its colours back
-  for (const block of [tall, short, tallInFullscreen, tallInWideCharacters]) await block.redraw()
+  // Act: every block is drawn again with its colours back, and the tall one also in a fullscreen view of the session
+  for (const block of [tall, short, tallInFullscreen, tallInWideCharacters, tallInEmoji]) await block.redraw()
+  const tallInAnotherView = await $.ui.mount({ ...outputBlock('call-48', list(40), true), requestId: 'call-48-fullscreen', viewport: fullscreen })
+  await tallInAnotherView.redraw()
 
   // Assert: only the tall blocks on the main screen, wide characters counted as two cells, stay as Claude Code drew them
   expect((await tall.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
   expect((await tallInWideCharacters.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await tallInEmoji.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
   expect((await short.findAll({ type: 'Text' })).map(t => t.text)).toContain('- item 0')
   expect((await tallInFullscreen.findAll({ type: 'Text' })).map(t => t.text)).toContain('- item 0')
-  for (const handle of [tall, short, tallInFullscreen, tallInWideCharacters, ...rows]) await handle.unmount()
+  expect((await tallInAnotherView.findAll({ type: 'Text' })).map(t => t.text)).toContain('- item 0')
+  for (const handle of [tall, short, tallInFullscreen, tallInWideCharacters, tallInEmoji, tallInAnotherView, ...rows]) await handle.unmount()
 })
 
 test('a subagent\'s Bash call returns at once, with no colours made for rows this transcript does not draw as it ends', async ($, on) => {
@@ -680,9 +713,50 @@ test('more distinct command rows than the colour cache holds, drawn again while 
   for (const row of rows) await row.unmount()
 })
 
-test('a row drawn while every colouring worker is busy is coloured before rows that waited longer', { timeoutMs: 30_000 }, async ($, on) => {
-  // Arrange: a worker that takes a real 50 ms and records the commands in the order it starts them
+test('an Output block drawn in two versions sends each to a worker once while 200 other blocks are coloured', { timeoutMs: 120_000 }, async ($, on) => {
+  // Arrange: the two versions' workers are held; every other block is answered at once
   const started: string[] = []
+  const held: Array<() => void> = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    const text = String(asked.output ?? asked.command ?? '')
+    started.push(text)
+    if (text.startsWith('# Version')) await new Promise<void>(resolve => held.push(resolve))
+    const lines = text.split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const handles: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void> }> = []
+  handles.push(await $.ui.mount(commandRow('call-54', 'cat version.md')))
+  handles.push(await $.ui.mount(outputBlock('call-54', { stdout: '# Version one\n', stderr: '', interrupted: false, isImage: false })))
+  const second = await $.ui.mount({ ...outputBlock('call-54', { stdout: '# Version two\n', stderr: '', interrupted: false, isImage: false }), requestId: 'call-54-second' })
+  for (let n = 0; n < 200; n++) {
+    handles.push(await $.ui.mount(commandRow(`call-other-${n}`, `cat other-${n}.md`)))
+    handles.push(await $.ui.mount(outputBlock(`call-other-${n}`, { stdout: `# Other ${n}\n`, stderr: '', interrupted: false, isImage: false })))
+  }
+  await new Promise(resolve => setTimeout(() => resolve(undefined), 1000))
+
+  // Act: the first version's worker finishes, and the second version, still waiting, is drawn again
+  held.shift()?.()
+  await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+  await second.redraw()
+
+  // Assert: the second version went to a worker once
+  expect(started.filter(text => text === '# Version two')).toEqual(['# Version two'])
+  while (held.length > 0) held.shift()?.()
+  for (const handle of [second, ...handles]) await handle.unmount()
+})
+
+test('a row drawn while every colouring worker is busy is coloured before rows that waited longer', { timeoutMs: 30_000 }, async ($, on) => {
+  // Arrange: a worker held until the test lets it go, recording the commands in the order it starts them
+  const started: string[] = []
+  const held: Array<() => void> = []
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -691,16 +765,20 @@ test('a row drawn while every colouring worker is busy is coloured before rows t
   on('process.run', async (_, e) => {
     const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
     started.push(String(asked.command ?? ''))
-    await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+    await new Promise<void>(resolve => held.push(resolve))
     const lines = [[{ t: String(asked.command ?? ''), fg: '#ff0000', b: false, i: false, u: false }]]
 
     return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
   })
   const rows: Array<{ unmount: () => Promise<void> }> = []
 
-  // Act: five rows take the four workers and one place in line, then a sixth is drawn
   for (let n = 1; n <= 6; n++) rows.push(await $.ui.mount(commandRow(`call-queue-${n}`, `cat queue-${n}.md`)))
-  await new Promise(resolve => setTimeout(() => resolve(undefined), 400))
+
+  // Act: with all six rows drawn (four running, two waiting in line), the workers finish one at a time
+  while (held.length > 0) {
+    held.shift()?.()
+    await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+  }
 
   // Assert: the sixth started before the fifth
   expect(started).toEqual(['cat queue-1.md', 'cat queue-2.md', 'cat queue-3.md', 'cat queue-4.md', 'cat queue-6.md', 'cat queue-5.md'])

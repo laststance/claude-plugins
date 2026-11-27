@@ -10,6 +10,7 @@ import { lex, programOf } from './shell.mjs'
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
  * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
+ * @property {string[]} grepped - The files and folders with a space in their name the command gave a grep.
  */
 
 // ---------- Output shapes ----------
@@ -193,11 +194,16 @@ const sharedExtension = files => {
   return [...exts][0]
 }
 
-/** The words of `args` that name files: not flags, and not the values of flags that take one. */
+/** The words of `args` that name files: not flags, and not the values of flags that take one; after `--`, all. */
 const fileArgs = args => {
   const files = []
   for (let k = 0; k < args.length; k++) {
     const a = args[k]
+    // `--` ends the flags: every word after it is a file, `-notes.md` too
+    if (a === '--') {
+      files.push(...args.slice(k + 1))
+      break
+    }
     if (VALUE_FLAGS.has(a)) { k++; continue }
     if (a === '-' || a.startsWith('-') || a.startsWith('+')) continue
     files.push(a)
@@ -283,11 +289,12 @@ const languageOf = (program, fed) => {
  */
 export const planOutput = (command, output) => {
   const segments = command.trim() === '' ? [] : lex(command)
-  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [] }
+  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [], grepped: [] }
 
   const names = new Set()
   const printed = new Set()
   const counted = []
+  const grepped = []
   let fed = null
   for (const seg of segments) {
     const program = programOf(seg)
@@ -295,7 +302,9 @@ export const planOutput = (command, output) => {
     if (program !== null) {
       for (const name of namesOf(program)) names.add(name)
       // wc's own flags take no value, so every other word is a file it counts
-      if (program.name === 'wc') counted.push(...program.args.filter(arg => !arg.startsWith('-')))
+      if (program.name === 'wc') counted.push(...operandsOf(program.args))
+      // a grep's hits name its files, and the strong form takes no name with a space: those the command gave it are known
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...operandsOf(program.args).filter(arg => /\s/.test(arg)))
       fed = languageOf(program, fed)
     }
     // the last stage of a pipeline prints; a silent command prints nothing
@@ -308,7 +317,7 @@ export const planOutput = (command, output) => {
   const languages = [...printed].filter(lang => lang !== null)
   const language = languages.length === 1 ? languages[0] : languages.length === 0 ? sniffJson(output) : null
   const shapes = SHAPES.filter(shape => shape.programs.some(name => names.has(name))).map(shape => shape.id)
-  return { language, shapes, counted }
+  return { language, shapes, counted, grepped }
 }
 
 /**
@@ -318,6 +327,8 @@ export const planOutput = (command, output) => {
  * The worker then starts the Language's grammar afresh after such rows, since each later print is a file of its own:
  * the first file's state (an open comment) must not run into it, and its frontmatter must open it. With one print, a
  * row of a shape inside it is the file's own text (an example in a fenced block), so the state runs on across it.
+ * With several prints, a shape row inside one of the files (a git status line in a comment) restarts the grammar too:
+ * the output does not say where each print ends.
  * Called by tokenize.mjs.
  *
  * @param command - The shell command the Bash call ran, or '' when unknown.
@@ -371,6 +382,47 @@ const sniffJson = output => {
 /** What {@link assignLines} gives a line drawn in the block's Language. */
 export const BLOCK = 'block'
 
+/** The programs whose hits the `grep` shape colours. */
+const GREP_PROGRAMS = new Set(['grep', 'egrep', 'fgrep', 'ggrep', 'rg', 'ag', 'git grep'])
+
+/**
+ * The words of a command that are not flags: every word after `--`, which ends the flags (`wc -l -- -notes.md`), and the
+ * words before it that do not open with `-`. Called by {@link planOutput}.
+ *
+ * @param args - A program's words after its name.
+ * @returns the words, in order
+ * @example
+ * operandsOf(['-l', '--', '-notes.md']) // => ['-notes.md']
+ */
+const operandsOf = args => {
+  const end = args.indexOf('--')
+  const before = end === -1 ? args : args.slice(0, end)
+  return [...before.filter(arg => !arg.startsWith('-')), ...(end === -1 ? [] : args.slice(end + 1))]
+}
+
+/**
+ * Whether a line is a grep hit in a file or folder with a space in its name that the command gave the grep:
+ * `src/release notes.ts:12:` or, under a folder, `docs/my notes/a.md:3:`, with `-` for context rows.
+ *
+ * The strong form takes no path with a space, as prose can hold one before a colon; the command naming the file tells
+ * them apart. Each check reads the line once. Called by {@link assignLines}.
+ *
+ * @param line - A line of the block.
+ * @param grepped - The names with a space the command gave a grep, from {@link planOutput}.
+ * @returns true when the line is a hit in one of them
+ * @example
+ * isHitOf('src/release notes.ts:12:deploy', new Set(['src/release notes.ts'])) // => true
+ */
+const isHitOf = (line, grepped) => {
+  for (const name of grepped) {
+    if (!line.startsWith(name)) continue
+    const rest = line.slice(name.length)
+    // the line number right after the name, or a path under the named folder before it
+    if (/^[:-]\d+[:-]/.test(rest) || /^\/[^:\n]*[:-]\d+[:-]/.test(rest)) return true
+  }
+  return false
+}
+
 /**
  * Whether a line is wc's row for a file the command gave it: counts, then that file's name as written.
  *
@@ -388,6 +440,8 @@ export const BLOCK = 'block'
  * isCountOf('7 release notes', new Set(['release notes.md'])) // => false
  */
 const isCountOf = (line, counted) => {
+  // a row that does not open with a count is no wc row, whatever names follow
+  if (!/^\s*\d/.test(line)) return false
   for (const name of counted) {
     if (!line.endsWith(name)) continue
     const counts = line.slice(0, line.length - name.length)
@@ -419,8 +473,9 @@ export const assignLines = (lines, plan) => {
   // with a Language, only rows nothing but the command prints take a shape; prose stays in the Language
   const isStrongOnly = plan.language !== null
   const counted = new Set(plan.counted ?? [])
+  const grepped = new Set(plan.grepped ?? [])
   return lines.map(line => {
-    const shape = shapes.find(s => s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted)) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
+    const shape = shapes.find(s => s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted)) || (s.id === 'grep' && isHitOf(line, grepped)) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
     if (shape) return shapeScope(shape.id)
     return plan.language === null ? null : BLOCK
   })

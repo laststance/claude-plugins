@@ -74,6 +74,10 @@ const keptAsDrawn = new Map<string, true>()
 // and the key stays short. Two versions are kept, so two drawings of one call's text (the record before and after a
 // rewrite, two surfaces) do not push each other out and start workers in turn
 const outputColours = new Map<string, Array<{ source: string; colours: Colours }>>()
+// Output blocks whose colours are being made, by call, plan and exact text: kept out of `outputColours`, whose bound
+// could push out a version still waiting for its worker, and a redraw would then colour it again
+const colouringOutputs = new Set<string>()
+const pendingKey = (payload: OutputPayload) => `${outputKey(payload)}\u0000${payload.output}`
 // Output blocks whose colours were made and then pushed out of a full outputColours: Claude Code draws them as they
 // are, as colouring one again would push out another, and with more blocks drawn than it holds every redraw would start
 // workers without end
@@ -87,13 +91,34 @@ const payloads = new Map<string, { head: string; payload: OutputPayload | null }
 const waitingForCommand = new Map<string, true>()
 let options: Options = { editor: 'auto', theme: '', strength: 0.55, codeStrength: 1, outputStrength: 0.75, collapsedLines: 3 }
 
-const channels = (hex: string) => [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16))
+/**
+ * A theme colour as its red, green and blue channels, or null when it is not a hex colour.
+ *
+ * Themes write colours as `#RRGGBB`, and also as `#RGB` and `#RGBA` (vesper, laserwave, synthwave-84) or `#RRGGBBAA`
+ * (light-plus): the short forms are widened and an alpha is dropped, as a terminal draws text opaque. Called by
+ * {@link soften}.
+ *
+ * @param hex - The colour as the theme wrote it.
+ * @returns `[r, g, b]` from 0 to 255, or null for anything else
+ * @example
+ * channels('#fff') // => [255, 255, 255]
+ * channels('#000000ff') // => [0, 0, 0]
+ */
+const channels = (hex: string) => {
+  const digits = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(hex)?.[1]
+  if (digits === undefined) return null
+  // #RGB and #RGBA repeat each digit; the alpha, last, is dropped either way
+  const full = digits.length <= 4 ? [...digits].map(d => d + d).join('') : digits
+  return [0, 2, 4].map(i => parseInt(full.slice(i, i + 2), 16))
+}
 
 // pulls a theme colour toward grey: strength 1 keeps it, 0 makes it grey
 const soften = (hex: string, strength: number) => {
-  if (strength >= 1) return hex
-  const grey = channels(DIM_TO)
-  const mixed = channels(hex).map((c, n) => {
+  const colour = channels(hex)
+  // a colour that is not hex is drawn as the theme wrote it
+  if (strength >= 1 || colour === null) return hex
+  const grey = channels(DIM_TO) ?? [0, 0, 0]
+  const mixed = colour.map((c, n) => {
     const g = grey[n] ?? 0
     return Math.round(g + (c - g) * strength)
   })
@@ -135,6 +160,8 @@ const coloursOf = (payload: Payload): Colours | undefined => {
     const key = keyOf(payload)
     return colouring.has(key) ? 'pending' : cache.get(key)
   }
+  // a version waiting for its worker is answered first, whatever the bounded cache kept
+  if (colouringOutputs.has(pendingKey(payload))) return 'pending'
   const key = outputKey(payload)
   const kept = outputColours.get(key)
   // colours of the same call and plan made from other text (the record before another mod rewrote it) are no answer
@@ -146,6 +173,12 @@ const coloursOf = (payload: Payload): Colours | undefined => {
 /** Caches a payload's colours where {@link coloursOf} finds them. Called by {@link highlight}. */
 const keepColours = (payload: Payload, colours: Colours) => {
   if ('output' in payload) {
+    // a version waiting for its worker stays apart; only made colours take one of the two places per call and plan
+    if (colours === 'pending') {
+      colouringOutputs.add(pendingKey(payload))
+      return
+    }
+    colouringOutputs.delete(pendingKey(payload))
     const key = outputKey(payload)
     // this text's version replaces its older self; of the other versions, the newest stays
     const others = (outputColours.get(key) ?? []).filter(version => version.source !== payload.output)
@@ -330,7 +363,7 @@ const outputPayload = (id: string, head: string): OutputPayload | null => {
 }
 
 // how many terminal cells a character takes: two for wide (CJK, full-width, emoji), else one
-const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u{1F300}-\u{1F64F}\u{1F900}-\u{1F9FF}\u{20000}-\u{3FFFD}]/u
+const WIDE = /[ᄀ-ᅟ⺀-〾ぁ-㏿㐀-䶿一-鿿ꀀ-꓏가-힣豈-﫿︰-﹏＀-｠￠-￦]|[\u{1F300}-\u{1F64F}\u{1F680}-\u{1F6FF}\u{1F900}-\u{1F9FF}\u{1FA70}-\u{1FAFF}\u{20000}-\u{3FFFD}]/u
 const cellsOf = (ch: string) => (WIDE.test(ch) ? 2 : 1)
 
 /**
@@ -404,15 +437,6 @@ const foldRows = (lines: Run[][], width: number) => {
 }
 
 /**
- * Draws runs as Text: a coloured run pulled toward grey by `strength`, brightened while hovered.
- *
- * @param Text - The surface's Text element.
- * @param runs - One line's runs.
- * @param strength - 1 keeps the theme's colours, 0 makes them grey.
- * @param scope - The hover scope that brightens the line's runs together.
- * @param dimPlain - Whether uncoloured text is dimmed too (Bash commands: yes; Output blocks: no, they read as text).
- */
-/**
  * The hover scope of a call's rows. The engine takes a scope of 1 to 64 characters and refuses a tree holding a
  * longer one, so a long call id (a gateway's) keeps only its last 40 characters, where ids differ. Called by the
  * `ToolResult` and `ToolUse` hooks.
@@ -439,6 +463,15 @@ const scopeOf = (kind: string, id: string) => `syntax-highlight:${kind}${id.slic
  */
 const drawnNodes = (rows: Run[][]) => rows.reduce((sum, runs) => sum + 1 + 2 * Math.max(runs.length, 1), 0)
 
+/**
+ * Draws runs as Text: a coloured run pulled toward grey by `strength`, brightened while hovered.
+ *
+ * @param Text - The surface's Text element.
+ * @param runs - One line's runs.
+ * @param strength - 1 keeps the theme's colours, 0 makes them grey.
+ * @param scope - The hover scope that brightens the line's runs together.
+ * @param dimPlain - Whether uncoloured text is dimmed too (Bash commands: yes; Output blocks: no, they read as text).
+ */
 const renderRuns = (Text: any, runs: Run[], strength: number, scope: string, dimPlain = strength < 1) =>
   runs.length === 0
     ? [<Text> </Text>]
@@ -537,7 +570,7 @@ export const register: Register = (on, userOptions) => {
     const done = coloursOf(payload)
     if (done === undefined) void highlight($, payload)
     if (done === undefined || done === 'pending') return drawnByClaudeCode()
-    if (done === 'failed' || done === 'plain' || (isExpanded && keptAsDrawn.has(id))) return next(e)
+    if (done === 'failed' || done === 'plain' || (isExpanded && e.viewport?.isFullscreen === false && keptAsDrawn.has(id))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = scopeOf('out:', String(e.props.tool_use_id))

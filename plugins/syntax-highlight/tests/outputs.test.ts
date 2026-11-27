@@ -11,7 +11,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '# Pitfalls from real runs')
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: [], counted: [] })
+    expect(plan).toEqual({ language: 'md', shapes: [], counted: [], grepped: [] })
   })
 
   test('a file printed through head keeps the file\'s Language', () => {
@@ -94,7 +94,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '{\n  "CFBundleName" => "Grok Bot"\n}')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['plutil'], counted: [] })
+    expect(plan).toEqual({ language: null, shapes: ['plutil'], counted: [], grepped: [] })
   })
 })
 
@@ -120,7 +120,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [] })
+    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [], grepped: [] })
     expect(scopes).toEqual([
       null,
       'text.output.grep',
@@ -144,7 +144,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['wc'], counted: ['*.md'] })
+    expect(plan).toEqual({ language: 'md', shapes: ['wc'], counted: ['*.md'], grepped: [] })
     expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK, BLOCK])
   })
 
@@ -195,7 +195,7 @@ describe('Output shapes in an Output block', () => {
     const plan = planOutput(unknownCommand, 'src/a.ts:12:const a = 1')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS, counted: [] })
+    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS, counted: [], grepped: [] })
   })
 })
 
@@ -272,7 +272,7 @@ describe('Output shapes inside a Language block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'], counted: [] })
+    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'], counted: [], grepped: [] })
     expect(scopes).toEqual(new Array(42).fill(BLOCK))
   })
 
@@ -423,6 +423,34 @@ test('a GNU wc count of a counted file whose name opens with a number keeps its 
   expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK])
 })
 
+test('grep hits in a file or folder with a space in its name that the command grepped keep their colours in a Markdown block', () => {
+  // Arrange: the file itself, and a folder searched recursively
+  const cases = [
+    { command: 'grep -Hn deploy "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:12:deploy', '# Guide', '12: items'] },
+    { command: 'grep -rn deploy "docs/my notes"; cat guide.md', lines: ['docs/my notes/a.md:3:deploy', '# Guide', '12: items'] },
+  ]
+
+  for (const { command, lines } of cases) {
+    // Act
+    const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+    // Assert: a bare `12:` row stays Markdown
+    expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
+  }
+})
+
+test('a GNU wc count of a file named after -- (a name that opens with -) keeps its colours, and the file after it opens with its frontmatter', () => {
+  // Arrange
+  const command = "wc -l -- '-release notes.md'; cat -- '-release notes.md'"
+  const lines = ['7 -release notes.md', '---', 'title: Release', '---']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK])
+})
+
 describe('colouring never stalls on a pathological line', () => {
   /** A line of 200,000 characters (the colouring cap): `lead`, then `unit` repeated, then `end`. */
   const fill = (unit: string, lead = '', end = '') =>
@@ -441,7 +469,7 @@ describe('colouring never stalls on a pathological line', () => {
       for (const language of [null, 'md']) {
         for (const { label, line } of LINES) {
           // Arrange
-          const plan = { language, shapes: [shape], counted: ['release notes.md'] }
+          const plan = { language, shapes: [shape], counted: ['release notes.md'], grepped: ['src/release notes.ts'] }
 
           // Act: the fastest of three runs, so a busy machine does not fail a fast regex
           const elapsed = Math.min(...[1, 2, 3].map(() => {
