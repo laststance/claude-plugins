@@ -6,8 +6,15 @@ import { hasColour, planOutput, type OutputPlan } from '../outputs.mjs'
 type Run = { t: string; fg: string | null; b: boolean; i: boolean; u: boolean }
 /** What tokenize.mjs prints: the lines of the text, and whose theme coloured them. */
 type Result = { lines: Run[][]; editor: string; theme: string }
+/** A Bash call's Output block to colour: the part within the colouring cap, its command and call, and its plan. */
+type OutputPayload = { output: string; command: string; id: string; plan: OutputPlan }
 /** What tokenize.mjs is asked to colour: a Bash command, a snippet in a language, or a command's Output block. */
-type Payload = { command: string } | { code: string; language: string } | { output: string; command: string; id: string; plan: OutputPlan }
+type Payload = { command: string } | { code: string; language: string } | OutputPayload
+/**
+ * A payload's colours while cached: the lines; still being made; failed, or an Output block with nothing coloured (both
+ * left for Claude Code to draw).
+ */
+type Colours = Result | 'pending' | 'failed' | 'plain'
 type Options = { editor: string; theme: string; strength: number; codeStrength: number; outputStrength: number; collapsedLines: number }
 /** The fields of a Bash result this mod reads; the rest it leaves to Claude Code. */
 type BashOutput = {
@@ -26,6 +33,10 @@ type Colourable = { stdout: string; hasSiblings: boolean }
 const SHOW_CODE = 'mcp__syntax-highlight__show_code'
 const DIM_TO = '#999999'
 const MAX_CACHED = 200
+// Calls whose command, and whether their result waits for it, are kept: a short string or a flag each, so far more
+// than MAX_CACHED. A command forgotten while its rows are still drawn makes its result wait again and its row ask for a
+// redraw again, on every pass, once more results are drawn than this keeps
+const MAX_CALLS = 20_000
 // An Output block is coloured up to this many lines or characters; the rest is drawn as it is
 const MAX_OUTPUT_LINES = 2000
 const MAX_OUTPUT_CHARS = 200_000
@@ -35,11 +46,17 @@ const OUTPUT_WAIT_MS = 1500
 const FOLD_ROWS = 3
 const FOLD_INDENT = 10
 
-const cache = new Map<string, Result | 'pending' | 'failed'>()
+// the colours of commands and snippets, by their text
+const cache = new Map<string, Colours>()
+// the colours of Output blocks, per call and plan, each with the text it was made from: a lookup for any other text
+// misses (another mod can rewrite a call's record after the tool.call hook coloured it, as secret-guard masks secrets),
+// and the key stays short
+const outputColours = new Map<string, { source: string; colours: Colours }>()
+// each call's command, which plans its Output block
 const commands = new Map<string, string>()
-// outputPayload's answers, per call and command, each with the text it was planned from, so a redraw does not split
-// and plan the same block again
-const payloads = new Map<string, { stdout: string; payload: Payload | null }>()
+// outputPayload's answers, per call and command, each with the capped text it was planned from, so a redraw does not
+// plan the same block again
+const payloads = new Map<string, { head: string; payload: OutputPayload | null }>()
 // calls whose Output block was drawn before their command was known (a resumed session draws results first)
 const waitingForCommand = new Map<string, true>()
 let options: Options = { editor: 'auto', theme: '', strength: 0.55, codeStrength: 1, outputStrength: 0.75, collapsedLines: 3 }
@@ -57,36 +74,61 @@ const soften = (hex: string, strength: number) => {
   return `#${mixed.map(c => c.toString(16).padStart(2, '0')).join('')}`
 }
 
-// an Output block's key holds its plan and its whole text: a command learned later (a resumed session) plans it
-// differently, and another mod can rewrite a call's record after the `tool.call` hook coloured it (secret-guard masks
-// its secrets, keeping or changing its length), so the colours of one text are never drawn for another
-const keyOf = (payload: Payload) =>
-  'output' in payload
-    ? `out:${payload.id}:${payload.plan.language ?? ''}:${payload.plan.shapes.join(',')}:${payload.output}`
-    : 'code' in payload ? `code:${payload.language}:${payload.code}` : `cmd:${payload.command}`
+// a command's or a snippet's colours are found by its text
+const keyOf = (payload: Exclude<Payload, OutputPayload>) => ('code' in payload ? `code:${payload.language}:${payload.code}` : `cmd:${payload.command}`)
 
-/** Keeps a bounded map from growing past {@link MAX_CACHED} entries, oldest out first. */
-const remember = <V,>(map: Map<string, V>, key: string, value: V) => {
+// an Output block's colours are kept per call and plan: a command learned later (a resumed session) plans it differently
+const outputKey = (payload: OutputPayload) => `${payload.id}:${payload.plan.language ?? ''}:${payload.plan.shapes.join(',')}`
+
+/** Keeps a bounded map from growing past `max` entries ({@link MAX_CACHED} unless given), oldest out first. */
+const remember = <V,>(map: Map<string, V>, key: string, value: V, max = MAX_CACHED) => {
   map.set(key, value)
-  if (map.size > MAX_CACHED) map.delete(map.keys().next().value as string)
+  if (map.size > max) map.delete(map.keys().next().value as string)
 }
+
+/**
+ * The colours cached for a payload: a command's or a snippet's by its text, an Output block's only when they were made
+ * from the same text.
+ *
+ * Called by every hook before it colours or draws.
+ *
+ * @param payload - What was asked to be coloured.
+ * @returns the cached colours, or undefined when none were made for this text
+ * @example
+ * coloursOf({ command: 'ls -la' }) // => { lines: [[{ t: 'ls', fg: '#8cb6ff', ... }, ...]], editor: 'vscode', theme: '...' }
+ */
+const coloursOf = (payload: Payload): Colours | undefined => {
+  if (!('output' in payload)) return cache.get(keyOf(payload))
+  const kept = outputColours.get(outputKey(payload))
+  // colours of the same call and plan made from other text (the record before another mod rewrote it) are no answer
+  return kept !== undefined && kept.source === payload.output ? kept.colours : undefined
+}
+
+/** Caches a payload's colours where {@link coloursOf} finds them. Called by {@link highlight}. */
+const keepColours = (payload: Payload, colours: Colours) => {
+  if ('output' in payload) remember(outputColours, outputKey(payload), { source: payload.output, colours })
+  else remember(cache, keyOf(payload), colours)
+}
+
+// whether any run of a result has a colour or a style
+const isColoured = (result: Result) => result.lines.some(runs => runs.some(r => r.fg !== null || r.b || r.i || r.u))
 
 /**
  * Colours a payload in the node worker (tokenize.mjs) and caches the lines, then redraws.
  *
  * Called when a Bash call starts (its command), when it ends (its Output block), when `show_code` runs, and by a
- * render hook that finds nothing cached yet. A failure is cached too, so the row stays as Claude Code draws it.
+ * render hook that finds nothing cached yet. A failure is cached too, so the row stays as Claude Code draws it, and so
+ * is an Output block the worker leaves uncoloured (a Language with no grammar, `cat notes.zzunknown`).
  *
  * @param $ - The engine interface, for `$.process.run`.
  * @param payload - What to colour.
  * @returns once the lines are cached (or the failure is)
  * @example
  * await highlight($, { command: 'ls -la' })
- * cache.get('cmd:ls -la') // => { lines: [[{ t: 'ls', fg: '#8cb6ff', ... }, ...]], editor: 'vscode', theme: '...' }
+ * coloursOf({ command: 'ls -la' }) // => { lines: [[{ t: 'ls', fg: '#8cb6ff', ... }, ...]], editor: 'vscode', theme: '...' }
  */
 const highlight = async ($: EngineInterface, payload: Payload) => {
-  const key = keyOf(payload)
-  remember(cache, key, 'pending')
+  keepColours(payload, 'pending')
 
   try {
     // the worker plans an Output block itself; the call id and the hook's plan are only for the cache
@@ -96,9 +138,11 @@ const highlight = async ($: EngineInterface, payload: Payload) => {
       timeoutMs: 8000,
     })
     if (done.exitCode !== 0) throw new Error(done.stderr.slice(0, 300))
-    remember(cache, key, JSON.parse(done.stdout) as Result)
+    const result = JSON.parse(done.stdout) as Result
+    // an Output block with nothing coloured is Claude Code's to draw, as a block with nothing to colour is
+    keepColours(payload, 'output' in payload && !isColoured(result) ? 'plain' : result)
   } catch (error) {
-    remember(cache, key, 'failed')
+    keepColours(payload, 'failed')
     $.ui.log(`syntax-highlight: ${String(error)}`, { to: 'debug' })
   }
   $.ui.invalidate('ui.render')
@@ -125,7 +169,8 @@ const colourableResult = (output: unknown): Colourable | null => {
   const out = output as BashOutput | null
   if (out === null || typeof out !== 'object' || typeof out.stdout !== 'string') return null
   if (out.interrupted === true || out.isImage === true || out.backgroundTaskId || out.returnCodeInterpretation) return null
-  const stdout = out.stdout.replace(/\s+$/, '')
+  // trimEnd, not a /\s+$/ replace: that retries from every space of a long run inside the text, quadratic in its length
+  const stdout = out.stdout.trimEnd()
   if (stdout === '') return null
   const hasStderr = typeof out.stderr === 'string' && out.stderr.trim() !== ''
   const hasImages = Array.isArray(out.viewedImagePaths) && out.viewedImagePaths.length > 0
@@ -154,27 +199,26 @@ const capOutput = (stdout: string) => {
 /**
  * The payload that colours a Bash call's Output block, or null when nothing of the block takes a colour.
  *
- * Memoized per call and command in {@link payloads}, for the text it was planned from: a redraw of an unchanged result
- * neither splits nor plans its block again, while a command learned later (a resumed session) or a record another mod
+ * Memoized per call and command in {@link payloads}, for the capped text it was planned from: a redraw of an unchanged
+ * result does not plan its block again, while a command learned later (a resumed session) or a record another mod
  * rewrote after the `tool.call` hook saw it (secret-guard masks its secrets) misses the memo and plans afresh. Called
  * by the `tool.call` hook and the `ToolResult` hook.
  *
  * @param id - The call's `tool_use_id`.
- * @param stdout - The block's text, from {@link colourableResult}.
+ * @param head - The part of the block within the colouring cap, from {@link capOutput}.
  * @returns the payload, or null when nothing takes a colour or not even the first line fits the cap (the worker would
  *   hand back one empty row, a row the command never printed)
  */
-const outputPayload = (id: string, stdout: string): Payload | null => {
+const outputPayload = (id: string, head: string): OutputPayload | null => {
   const command = commands.get(id) ?? ''
   const memoKey = `${id}\u0000${command}`
   const memo = payloads.get(memoKey)
   // the record drawn can differ from the one the tool.call hook saw (a mod outside this one rewrote it)
-  if (memo !== undefined && memo.stdout === stdout) return memo.payload
-  const { head } = capOutput(stdout)
+  if (memo !== undefined && memo.head === head) return memo.payload
   const plan = planOutput(command, head)
   // nothing fits the cap, or nothing in it takes a colour: Claude Code draws the block
   const payload = head === '' || !hasColour(head.split('\n'), plan) ? null : { output: head, command, id, plan }
-  remember(payloads, memoKey, { stdout, payload })
+  remember(payloads, memoKey, { head, payload })
   return payload
 }
 
@@ -279,14 +323,14 @@ export const register: Register = (on, userOptions) => {
   // colour a Bash call's command as it starts and its Output block as it ends, so both rows are ready when first drawn
   on('tool.call', { tool: 'Bash' }, async ($, e, next) => {
     const command = e.command.trimEnd()
-    if (command !== '' && !cache.has(keyOf({ command }))) void highlight($, { command })
-    remember(commands, e.tool_use_id, command)
+    if (command !== '' && coloursOf({ command }) === undefined) void highlight($, { command })
+    remember(commands, e.tool_use_id, command, MAX_CALLS)
 
     const done = await next(e)
     const result = 'result' in done && done.result !== undefined && !done.isError ? colourableResult(done.result) : null
-    const payload = result === null ? null : outputPayload(e.tool_use_id, result.stdout)
+    const payload = result === null ? null : outputPayload(e.tool_use_id, capOutput(result.stdout).head)
     // wait a little for the colours: the result row is drawn once the call returns, and a terminal may not redraw it
-    if (payload !== null && !cache.has(keyOf(payload))) await Promise.race([highlight($, payload), $.clock.sleep(OUTPUT_WAIT_MS)])
+    if (payload !== null && coloursOf(payload) === undefined) await Promise.race([highlight($, payload), $.clock.sleep(OUTPUT_WAIT_MS)])
 
     return done
   }).catch(($, e, next) => next(e))
@@ -305,18 +349,17 @@ export const register: Register = (on, userOptions) => {
     const result = colourableResult(e.props.output)
     if (result === null) return next(e)
     // drawn before its command is known: the ToolUse hook asks for a redraw once it learns it
-    if (!commands.has(e.props.tool_use_id)) remember(waitingForCommand, e.props.tool_use_id, true)
-    const stdout = result.stdout
-    const payload = outputPayload(e.props.tool_use_id, stdout)
+    if (!commands.has(e.props.tool_use_id)) remember(waitingForCommand, e.props.tool_use_id, true, MAX_CALLS)
+    const { head, rest } = capOutput(result.stdout)
+    const payload = outputPayload(e.props.tool_use_id, head)
     if (payload === null) return next(e)
 
-    const done = cache.get(keyOf(payload))
+    const done = coloursOf(payload)
     if (done === undefined) void highlight($, payload)
-    if (done === undefined || done === 'pending' || done === 'failed') return next(e)
+    if (done === undefined || done === 'pending' || done === 'failed' || done === 'plain') return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = `syntax-highlight:out:${e.props.tool_use_id}`
-    const { rest } = capOutput(stdout)
     const plain: Run[][] = rest.map(line => (line === '' ? [] : [{ t: line, fg: null, b: false, i: false, u: false }]))
     const lines = [...done.lines, ...plain]
     // collapsed, the block folds as Claude Code folds it; expanded (ctrl+o, verbose), every line is drawn
@@ -353,19 +396,19 @@ export const register: Register = (on, userOptions) => {
     // the Output block's row has no command of its own: keep it for the ToolResult hook (a resumed session too)
     if (isBash && typeof input?.command === 'string') {
       const id = String(e.props.tool_use_id)
-      remember(commands, id, input.command.trimEnd())
+      remember(commands, id, input.command.trimEnd(), MAX_CALLS)
       // its Output block was drawn before the command was known: draw it again, once, planned from the command
       if (waitingForCommand.delete(id)) $.ui.invalidate('ui.render')
     }
 
-    const payload: Payload | null = isShow
+    const payload: Exclude<Payload, OutputPayload> | null = isShow
       ? typeof input?.code === 'string' ? { code: input.code.trimEnd(), language: String(input.language ?? '') } : null
       : typeof input?.command === 'string' && input.command.trim() !== '' ? { command: input.command.trimEnd() } : null
     if (payload === null) return next(e)
 
-    const done = cache.get(keyOf(payload))
+    const done = coloursOf(payload)
     if (done === undefined) void highlight($, payload)
-    if (done === undefined || done === 'pending' || done === 'failed') return next(e)
+    if (done === undefined || done === 'pending' || done === 'failed' || done === 'plain') return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = `syntax-highlight:${String(e.props.tool_use_id ?? keyOf(payload).length)}`

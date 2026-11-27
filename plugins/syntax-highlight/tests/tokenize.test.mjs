@@ -59,7 +59,17 @@ test('a grep hit printed next to a file of unknown type keeps its line-number co
   const lines = colourOutput('12:const deploy = 1', command)
 
   // Assert: the `12` is coloured as a grep line number
-  const number = lines[0][0]
-  assert.equal(number.t, '12')
-  assert.notEqual(number.fg, null)
+  assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['12', '#b5cea8'], [':const deploy = 1', null]])
+})
+
+test('a grep hit printing `/*` between two TypeScript files leaves the second file TypeScript, not a comment', () => {
+  // Arrange
+  const output = ['const a = 1;', 'src/other.ts:3:/* TODO', 'const b = 2;'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'cat a.ts; grep -Hn TODO src/other.ts; cat b.ts')
+
+  // Assert: the second file is coloured as the first, and the grep row keeps its own colours
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['const', '#569cd6'], [' ', null], ['b', '#4fc1ff'], [' = ', null], ['2', '#b5cea8'], [';', null]])
+  assert.deepEqual(lines[1].map(run => [run.t, run.fg]), [['src/other.ts', '#4ec9b0'], [':', null], ['3', '#b5cea8'], [':/* TODO', null]])
 })

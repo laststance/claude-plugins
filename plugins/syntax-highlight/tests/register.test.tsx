@@ -360,3 +360,73 @@ test('a Bash call whose colours come back within the wait has its Output block c
   expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
   await block.unmount()
 })
+
+test('a resumed session drawing more results than the colour caches hold, before their commands, stops asking for redraws once every command is known', { timeoutMs: 60_000 }, async ($, on) => {
+  // Arrange: 201 results drawn before their command rows (one more than the colour caches keep), then the rows, then
+  // everything drawn once more so every command has been seen
+  const seen = standInForClaudeCode(on)
+  const ids = Array.from({ length: 201 }, (_, n) => `call-resume-${n}`)
+  const output = { stdout: 'ok\n', stderr: '', interrupted: false, isImage: false }
+  const handles: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void> }> = []
+  for (const id of ids) handles.push(await $.ui.mount(outputBlock(id, output)))
+  for (const id of ids) handles.push(await $.ui.mount(commandRow(id, 'echo ok')))
+  for (const handle of handles) await handle.redraw()
+  const invalidationsBefore = seen.invalidations
+
+  // Act: every row is drawn again, as a resize or a scroll back draws it
+  for (const handle of handles) await handle.redraw()
+
+  // Assert
+  expect(seen.invalidations - invalidationsBefore).toBe(0)
+  for (const handle of handles) await handle.unmount()
+})
+
+test('a block the worker leaves uncoloured (a file type with no grammar) is drawn by Claude Code as it is, cwd notice included', async ($, on) => {
+  // Arrange: Claude Code draws any row it is asked for, and the worker hands back every line without a colour
+  const drawnByClaudeCode: unknown[] = []
+  on('ui.render', ($, e) => {
+    if (e.component === 'ToolResult') drawnByClaudeCode.push(e.props.output)
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    const text = String(asked.output ?? asked.command ?? '')
+    const lines = text.split('\n').map(t => (t === '' ? [] : [{ t, fg: null, b: false, i: false, u: false }]))
+
+    return {
+      value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false },
+    }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const output = { stdout: 'plain notes\n', stderr: CWD_NOTICE, interrupted: false, isImage: false }
+  const row = await $.ui.mount(commandRow('call-25', 'cat notes.zzunknown'))
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-25', output))
+  await block.redraw()
+
+  // Assert: only Claude Code's drawing, given the result untouched
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect(drawnByClaudeCode.at(-1)).toEqual(output)
+  await block.unmount()
+  await row.unmount()
+})
+
+test('a result with a long run of spaces inside a line is drawn coloured at once, without stalling the call', async ($, on) => {
+  // Arrange: a padded field 200,000 spaces wide, then a value, under a Markdown heading
+  standInForClaudeCode(on)
+  on('tool.call', () => ({ result: { stdout: `# Notes\nx${' '.repeat(200_000)}y\n`, stderr: '', interrupted: false, isImage: false } }))
+
+  // Act
+  const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-26' } as never)
+  const block = await $.ui.mount(outputBlock('call-26', (done as { result?: Record<string, unknown> }).result ?? {}))
+  await block.redraw()
+
+  // Assert: the heading is the mod's coloured row; the over-long line follows it as it is
+  const texts = (await block.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('# Notes')
+  expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
+  await block.unmount()
+})

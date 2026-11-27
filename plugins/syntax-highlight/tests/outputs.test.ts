@@ -312,6 +312,18 @@ describe('Output shapes inside a Language block', () => {
     expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK, 'text.output.wc', 'text.output.wc'])
   })
 
+  test('a wc count right-aligned in 8 columns keeps its colours before a file name with a space, while a number followed by wide spacing stays Markdown', () => {
+    // Arrange
+    const command = 'wc -l "release notes.md" && cat "release notes.md"'
+    const lines = ['       6 release notes.md', '      12', '2       **attempts**', '# Release notes']
+
+    // Act
+    const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+    // Assert
+    expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK])
+  })
+
   test('a Markdown line opening with status letters stays Markdown when the command also ran git status, while the status rows keep their colours', () => {
     // Arrange
     const command = 'git status -s && cat notes.md'
@@ -388,19 +400,22 @@ describe('Output shapes inside a Language block', () => {
 })
 
 describe('colouring never stalls on a pathological line', () => {
-  // lines of 200,000 characters (the colouring cap) made only of dots, slashes, colons, spaces and digits
-  const FILLS = ['.', '/', ':', ' ', '1', '/:', '1 ', '1:', '. ', './', '1.', '1/', '.:', '/1:']
-  // and `git status` rows of that length whose path never ends the way one does: quotes, escapes, rename arrows
-  const STATUS_FILLS = ['"', '\\"', 'a\\', 'a -> ', '"a" -> ']
+  /** A line of 200,000 characters (the colouring cap): `lead`, then `unit` repeated, then `end`. */
+  const fill = (unit: string, lead = '', end = '') =>
+    `${lead}${unit.repeat(Math.ceil(200_000 / unit.length))}`.slice(0, 200_000 - end.length) + end
   const LINES = [
-    ...FILLS.map(fill => fill.repeat(Math.ceil(200_000 / fill.length)).slice(0, 200_000)),
-    ...STATUS_FILLS.map(fill => `?? ${fill.repeat(Math.ceil(200_000 / fill.length))}`.slice(0, 200_000)),
+    // made only of dots, slashes, colons, spaces and digits
+    ...['.', '/', ':', ' ', '1', '/:', '1 ', '1:', '. ', './', '1.', '1/', '.:', '/1:'].map(unit => ({ label: JSON.stringify(unit), line: fill(unit) })),
+    // `git status` rows whose path never ends the way one does: quotes, escapes, rename arrows
+    ...['"', '\\"', 'a\\', 'a -> ', '"a" -> '].map(unit => ({ label: `?? ${JSON.stringify(unit)}`, line: fill(unit, '?? ') })),
+    // the same kinds of run ending in a character a regex `.` stops at, which a line can still hold: \r, U+2028
+    ...['1 ', ' ', '1', '. '].flatMap(unit => ['\r', ' '].map(end => ({ label: `${JSON.stringify(unit)} then ${JSON.stringify(end)}`, line: fill(unit, '', end) }))),
   ]
 
   test('every Output shape tests a 200,000-character line in under 50 ms, with and without a Language', () => {
     for (const shape of SHAPE_IDS) {
       for (const language of [null, 'md']) {
-        for (const line of LINES) {
+        for (const { label, line } of LINES) {
           // Arrange
           const plan = { language, shapes: [shape] }
 
@@ -411,7 +426,7 @@ describe('colouring never stalls on a pathological line', () => {
 
           // Assert
           // gstack-timing-ok: the 50 ms bound is the contract; the render hook tests every line synchronously, so a slower regex stalls Claude Code's drawing
-          expect({ shape, language, fill: line.slice(0, 6), slow: elapsed >= 50 }).toEqual({ shape, language, fill: line.slice(0, 6), slow: false })
+          expect({ shape, language, line: label, slow: elapsed >= 50 }).toEqual({ shape, language, line: label, slow: false })
         }
       }
     }

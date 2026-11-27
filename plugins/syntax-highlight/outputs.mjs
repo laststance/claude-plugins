@@ -106,11 +106,13 @@ const SHAPES = [
     id: 'wc',
     // `wc -l a b`: counts, then the name (`total` for the sum)
     programs: ['wc'],
-    // counts right-aligned in 8 columns, as BSD wc pads them, or counts before a path-like name or `total`; a count
-    // indented less and followed by a word (`  3 items`) is prose
-    strong: /^(?:(?=[ \d]{8}) *\d+(?:\s+\d+)*(?:\s+\S+)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
+    // a count ending in column 8, as BSD wc pads it, before any name (`release notes.md` too), or counts before a
+    // path-like name or `total`; a count indented less and followed by a word (`  3 items`) is prose. The name is read
+    // with [^\n] and not `.`, which stops at a \r or U+2028 a line can hold and makes the counts before it backtrack
+    // quadratically
+    strong: /^(?:(?=[ \d]{7}\d(?:\s|$)) *\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
     // any line of counts and text, which `2 deployments failed` also is
-    weak: /^\s*\d+(?:\s+\d+)*(?:\s+\S.*)?$/,
+    weak: /^\s*\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?$/,
     patterns: [
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)(\\s+)(total)$', captures: { 2: { name: 'constant.numeric.count.wc' }, 4: { name: 'keyword.other.total.wc' } } },
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)', captures: { 2: { name: 'constant.numeric.count.wc' } } },

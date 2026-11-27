@@ -68,24 +68,41 @@ const styleOf = (fg, font) => {
   return styleCache.get(key)
 }
 
-const tokenizeText = async (scope, text) => {
+/**
+ * Styles each character of a text with a grammar, line by line, carrying the grammar's state from one line to the next.
+ *
+ * Called for a Bash command, a `show_code` snippet, code inside a command, an Output block's Language and its Output
+ * shapes.
+ *
+ * @param scope - The grammar's TextMate scope; null or a scope with no grammar styles nothing.
+ * @param text - The text, its lines joined by `\n`.
+ * @param isSkipped - Lines, by index, left unstyled and never given to the grammar, so its state (an open fence, a
+ *   string, a block comment) runs on past them as if they were not there: another command's rows in an Output block.
+ * @returns one style per character of `text`: null for the default colour, else `{ fg, b, i, u }`
+ * @example
+ * await tokenizeText('source.ts', 'const a = 1') // => [{ fg: '#569cd6', ... } x5, null, ...]
+ */
+const tokenizeText = async (scope, text, isSkipped = () => false) => {
   const styles = new Array(text.length).fill(null)
   const grammar = scope ? await grammarFor(scope) : null
   if (!grammar) return styles
   let stack = null
   let offset = 0
-  for (const line of text.split('\n')) {
-    const r = grammar.tokenizeLine2(line, stack)
-    stack = r.ruleStack
-    for (let k = 0; k < r.tokens.length; k += 2) {
-      const start = r.tokens[k]
-      const end = k + 2 < r.tokens.length ? r.tokens[k + 2] : line.length
-      const meta = r.tokens[k + 1]
-      const fg = (colorMap[(meta & 0x00ff8000) >>> 15] ?? defaultFg).toLowerCase()
-      const font = (meta & 0x00007800) >>> 11
-      if (fg === defaultFg && font === 0) continue
-      const s = styleOf(fg === defaultFg ? null : fg, font)
-      for (let c = start; c < end; c++) styles[offset + c] = s
+  for (const [n, line] of text.split('\n').entries()) {
+    // a skipped line is not tokenized, so it can neither open nor close anything for the lines after it
+    if (!isSkipped(n)) {
+      const r = grammar.tokenizeLine2(line, stack)
+      stack = r.ruleStack
+      for (let k = 0; k < r.tokens.length; k += 2) {
+        const start = r.tokens[k]
+        const end = k + 2 < r.tokens.length ? r.tokens[k + 2] : line.length
+        const meta = r.tokens[k + 1]
+        const fg = (colorMap[(meta & 0x00ff8000) >>> 15] ?? defaultFg).toLowerCase()
+        const font = (meta & 0x00007800) >>> 11
+        if (fg === defaultFg && font === 0) continue
+        const s = styleOf(fg === defaultFg ? null : fg, font)
+        for (let c = start; c < end; c++) styles[offset + c] = s
+      }
     }
     offset += line.length + 1
   }
@@ -193,11 +210,12 @@ if (input.output !== undefined) {
   const firstLanguageLine = blockScope === null ? -1 : scopes.indexOf(blockScope)
   if (firstLanguageLine !== -1) {
     // the Language takes the block in one pass from its first line on, so its state (frontmatter, an open fence) runs
-    // on across the Output-shape rows inside it; those rows are coloured over it below. Rows before that first line
-    // are another command's output (`wc -l *.md && cat guide.md`): the pass starts after them, so the file's
-    // frontmatter still opens the Language's text
+    // on across the Output-shape rows inside it. The pass skips those rows, as another command printed them: a grep hit
+    // holding `/*` must not turn the next file into a comment. They are coloured as their shape below. Rows before that
+    // first line are another command's output too (`wc -l *.md && cat guide.md`): the pass starts after them, so the
+    // file's frontmatter still opens the Language's text
     const start = lines.slice(0, firstLanguageLine).reduce((length, line) => length + line.length + 1, 0)
-    const whole = await tokenizeText(blockScope, src.slice(start))
+    const whole = await tokenizeText(blockScope, src.slice(start), n => scopes[firstLanguageLine + n] !== blockScope)
     for (let c = 0; c < whole.length; c++) styles[start + c] = whole[c]
   }
   let offset = 0
