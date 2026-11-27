@@ -24,6 +24,11 @@
       "description": "macOS desktop notification when Claude Code needs you (waiting for input, a permission prompt); clicking it brings your terminal to the front"
     },
     {
+      "name": "move-project",
+      "source": "./plugins/move-project",
+      "description": "Open another project in the same terminal with the original conversation and tool results"
+    },
+    {
       "name": "open-in-editor",
       "source": "./plugins/open-in-editor",
       "description": "/vscode /cursor /devin-desktop /webstorm /phpstorm /zed open the session's project root in that editor (macOS)"
