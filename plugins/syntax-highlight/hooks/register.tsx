@@ -60,6 +60,9 @@ const FOLD_INDENT = 10
 
 // the colours of commands and snippets, by their text
 const cache = new Map<string, Colours>()
+// commands and snippets whose colours are being made, by their text: kept out of `cache`, whose bound could push one
+// out while it waits for a worker, before its row is ever coloured, and every redraw would then queue it again
+const colouring = new Set<string>()
 // command and snippet rows drawn in colour, by call: one whose colours were pushed out of `cache` since is drawn by
 // Claude Code rather than coloured again, so redrawing more rows than `cache` holds cannot start workers without end
 const colouredRows = new Map<string, true>()
@@ -128,7 +131,10 @@ const remember = <V,>(map: Map<string, V>, key: string, value: V, max = MAX_CACH
  * coloursOf({ command: 'ls -la' }) // => { lines: [[{ t: 'ls', fg: '#8cb6ff', ... }, ...]], editor: 'vscode', theme: '...' }
  */
 const coloursOf = (payload: Payload): Colours | undefined => {
-  if (!('output' in payload)) return cache.get(keyOf(payload))
+  if (!('output' in payload)) {
+    const key = keyOf(payload)
+    return colouring.has(key) ? 'pending' : cache.get(key)
+  }
   const key = outputKey(payload)
   const kept = outputColours.get(key)
   // colours of the same call and plan made from other text (the record before another mod rewrote it) are no answer
@@ -145,7 +151,13 @@ const keepColours = (payload: Payload, colours: Colours) => {
     const others = (outputColours.get(key) ?? []).filter(version => version.source !== payload.output)
     remember(outputColours, key, [...others.slice(-1), { source: payload.output, colours }], MAX_CACHED, pushed => remember(pushedOut, pushed, true, MAX_CALLS))
   } else {
-    remember(cache, keyOf(payload), colours)
+    const key = keyOf(payload)
+    // a command waiting for its colours stays apart until they are made; then they join the bounded cache
+    if (colours === 'pending') colouring.add(key)
+    else {
+      colouring.delete(key)
+      remember(cache, key, colours)
+    }
   }
 }
 
@@ -329,20 +341,24 @@ const cellsOf = (ch: string) => (WIDE.test(ch) ? 2 : 1)
  * drawing above the new one, doubled. Collapsed, a block takes a few rows; in fullscreen the screen redraws all of
  * itself. Called by the `ToolResult` hook whenever Claude Code draws a block it colours.
  *
- * @param lines - The block's lines.
+ * @param stdout - The block's text.
  * @param isExpanded - Whether every line is drawn (ctrl+o, verbose), not the fold.
  * @param viewport - The render event's screen size and kind; absent where no surface has measured.
  * @returns true when the block's wrapped rows and the prompt below them pass the main screen's height
  * @example
  * isTooTallToRedraw(fortyLines, true, { columns: 80, rows: 24, isFullscreen: false }) // => true
+ * isTooTallToRedraw('議'.repeat(60), true, { columns: 80, rows: 9, isFullscreen: false }) // => true (two rows)
  */
-const isTooTallToRedraw = (lines: string[], isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen?: boolean } | undefined) => {
+const isTooTallToRedraw = (stdout: string, isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen?: boolean } | undefined) => {
   if (!isExpanded || viewport === undefined || viewport.isFullscreen !== false) return false
   const width = Math.max(viewport.columns - FOLD_INDENT, 10)
   let rows = PROMPT_ROWS
-  // add each line's wrapped rows, stopping once past the screen
-  for (const line of lines) {
-    rows += Math.max(1, Math.ceil(line.length / width))
+  // add each line's wrapped rows, in the cells a terminal gives it (two for a wide character), stopping once past the
+  // screen
+  for (const line of stdout.split('\n')) {
+    let cells = 0
+    for (const ch of line) cells += cellsOf(ch)
+    rows += Math.max(1, Math.ceil(cells / width))
     if (rows > viewport.rows) return true
   }
   return false
@@ -396,6 +412,19 @@ const foldRows = (lines: Run[][], width: number) => {
  * @param scope - The hover scope that brightens the line's runs together.
  * @param dimPlain - Whether uncoloured text is dimmed too (Bash commands: yes; Output blocks: no, they read as text).
  */
+/**
+ * The hover scope of a call's rows. The engine takes a scope of 1 to 64 characters and refuses a tree holding a
+ * longer one, so a long call id (a gateway's) keeps only its last 40 characters, where ids differ. Called by the
+ * `ToolResult` and `ToolUse` hooks.
+ *
+ * @param kind - `out:` for an Output block, '' for a command row.
+ * @param id - The call's tool_use_id.
+ * @returns a scope of at most 61 characters
+ * @example
+ * scopeOf('out:', 'toolu_01AbC') // => 'syntax-highlight:out:toolu_01AbC'
+ */
+const scopeOf = (kind: string, id: string) => `syntax-highlight:${kind}${id.slice(-40)}`
+
 /**
  * How many nodes an Output block's rows take in a drawn tree: each row is a Text, and each of its runs a Text holding
  * its text (an empty row, one run of a space), as {@link renderRuns} draws them.
@@ -492,7 +521,7 @@ export const register: Register = (on, userOptions) => {
     // Claude Code draws the block until its colours are back; an expanded one too tall for the main screen to redraw
     // whole stays as Claude Code drew it, so no scrolled-off rows of this drawing are left doubled above a coloured one
     const drawnByClaudeCode = () => {
-      if (isTooTallToRedraw(result.stdout.split('\n'), isExpanded, e.viewport)) remember(keptAsDrawn, id, true, MAX_CALLS)
+      if (isTooTallToRedraw(result.stdout, isExpanded, e.viewport)) remember(keptAsDrawn, id, true, MAX_CALLS)
       return next(e)
     }
     // drawn before its command is known (a resumed session draws results first): Claude Code draws it until the ToolUse
@@ -511,7 +540,7 @@ export const register: Register = (on, userOptions) => {
     if (done === 'failed' || done === 'plain' || (isExpanded && keptAsDrawn.has(id))) return next(e)
 
     const { Box, Text } = $.ui.resolve(e)
-    const scope = `syntax-highlight:out:${e.props.tool_use_id}`
+    const scope = scopeOf('out:', String(e.props.tool_use_id))
     const plain: Run[][] = rest.map(line => (line === '' ? [] : [{ t: line, fg: null, b: false, i: false, u: false }]))
     const lines = [...done.lines, ...plain]
     // collapsed, the block folds as Claude Code folds it; expanded (ctrl+o, verbose), every line is drawn
@@ -571,7 +600,7 @@ export const register: Register = (on, userOptions) => {
     if (row !== null) remember(colouredRows, row, true, MAX_CALLS)
 
     const { Box, Text } = $.ui.resolve(e)
-    const scope = `syntax-highlight:${String(e.props.tool_use_id ?? keyOf(payload).length)}`
+    const scope = scopeOf('', String(e.props.tool_use_id ?? keyOf(payload).length))
     const dot = e.props.isErrored || e.props.isInterrupted ? 'error' : e.props.isRunning ? 'inactive' : 'success'
 
     // marginTop keeps the blank line Claude Code leaves above a tool row

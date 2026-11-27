@@ -371,24 +371,31 @@ const sniffJson = output => {
 /** What {@link assignLines} gives a line drawn in the block's Language. */
 export const BLOCK = 'block'
 
-// counts, then a name; the name is read with [^\n], not `.`, which stops at a \r or U+2028 and makes the counts backtrack
-const COUNTS_THEN_NAME = /^\s*\d+(?:\s+\d+)*\s+(\S[^\n]*)$/
-
 /**
  * Whether a line is wc's row for a file the command gave it: counts, then that file's name as written.
  *
  * GNU wc writes a lone file's count unpadded (`7 release notes.md`), which the `wc` shape's strong form does not take
  * when the name has a space or no `.` or `/` (prose looks the same). The command naming the file tells them apart.
- * Called by {@link assignLines}.
+ * The name is matched at the line's end, so one that opens with a number (`7 2026 notes.md`) is found too, and each
+ * check reads the line once. Called by {@link assignLines}.
  *
  * @param line - A line of the block.
  * @param counted - The files the command gave `wc`, from {@link planOutput}.
  * @returns true when the line counts one of those files
  * @example
  * isCountOf('7 release notes.md', new Set(['release notes.md'])) // => true
+ * isCountOf('7 2026 notes.md', new Set(['2026 notes.md'])) // => true
  * isCountOf('7 release notes', new Set(['release notes.md'])) // => false
  */
-const isCountOf = (line, counted) => counted.size > 0 && counted.has(COUNTS_THEN_NAME.exec(line)?.[1] ?? '')
+const isCountOf = (line, counted) => {
+  for (const name of counted) {
+    if (!line.endsWith(name)) continue
+    const counts = line.slice(0, line.length - name.length)
+    // before the name: digits and spaces only, at least one count, and a space before the name
+    if (/\s$/.test(counts) && /\d/.test(counts) && !/[^\d\s]/.test(counts)) return true
+  }
+  return false
+}
 
 /**
  * Gives each line of an Output block what colours it: the first Output shape of the plan it has, else the block's

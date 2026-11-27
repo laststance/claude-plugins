@@ -411,6 +411,18 @@ test('a GNU wc count before the name of a file the command counted keeps its col
   expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK, BLOCK, BLOCK])
 })
 
+test('a GNU wc count of a counted file whose name opens with a number keeps its colours', () => {
+  // Arrange: the name's first word is a number, which reads like another count
+  const command = 'wc -l "2026 release notes.md" && cat "2026 release notes.md"'
+  const lines = ['7 2026 release notes.md', '---', 'title: Release', '---']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual(['text.output.wc', BLOCK, BLOCK, BLOCK])
+})
+
 describe('colouring never stalls on a pathological line', () => {
   /** A line of 200,000 characters (the colouring cap): `lead`, then `unit` repeated, then `end`. */
   const fill = (unit: string, lead = '', end = '') =>

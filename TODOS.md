@@ -49,3 +49,15 @@
 **Effort:** S
 **Priority:** P3
 **Depends on:** syntax-highlight 0.1.1
+
+### Hand back expanded blocks past 100,000 characters
+
+**What:** Before drawing an expanded Output block, total the characters of its drawn text and hand the block to Claude Code past about 95,000, as is done past the node bound.
+
+**Why:** The engine draws only the first 100,000 characters of text in one tree and cuts the rest with no marker. Claude Code's Bash output is 30,000 characters by default, so this needs `BASH_MAX_OUTPUT_LENGTH` raised past 100,000 and an expanded view. Found by the 0.1.1 review (below the floor in its second pass, so not fixed there).
+
+**Context:** `plugins/syntax-highlight/hooks/register.tsx`, the `ToolResult` hook beside `drawnNodes` and `MAX_DRAWN_NODES`; `MAX_OUTPUT_CHARS` (200,000) could come down to match.
+
+**Effort:** S
+**Priority:** P3
+**Depends on:** syntax-highlight 0.1.1
