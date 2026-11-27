@@ -1,6 +1,6 @@
 {
   "name": "syntax-highlight",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Syntax-highlights Claude's Bash commands and what they print (Markdown, JSON, diffs, ls -l listings, grep hits, plutil -p...) with your editor's theme and TextMate grammars, and lets Claude show highlighted code on request",
   "author": {
     "name": "Laststance.io",
