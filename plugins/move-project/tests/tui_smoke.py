@@ -163,7 +163,7 @@ class MoveProjectTTY(unittest.TestCase):
         write_json(self.config / ".claude.json", {
             "hasCompletedOnboarding": True, "theme": "dark",
             "projects": {str(d): {"hasTrustDialogAccepted": True} for d in [self.a, self.b]},
-            "customApiKeyResponses": {"approved": ["research-placeholder"], "rejected": []},
+            "customApiKeyResponses": {"approved": ["mock"], "rejected": []},
         })
         self.api = MockMessages()
         threading.Thread(target=self.api.serve_forever, daemon=True).start()
@@ -176,7 +176,7 @@ class MoveProjectTTY(unittest.TestCase):
             "CLAUDE_CONFIG_DIR": str(self.config), "CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC": "1",
             "DISABLE_AUTOUPDATER": "1", "DISABLE_INSTALLATION_CHECKS": "1", "PYTHONDONTWRITEBYTECODE": "1",
             "ANTHROPIC_BASE_URL": f"http://127.0.0.1:{self.api.server_port}",
-            "ANTHROPIC_API_KEY": "sk-test-research-placeholder",
+            "ANTHROPIC_API_KEY": "mock",
         }
 
     def start(self, wrapped):
