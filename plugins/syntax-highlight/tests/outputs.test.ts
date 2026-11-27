@@ -430,6 +430,9 @@ test('grep hits in a file or folder with a space in its name that the command gr
     { command: 'grep -rn deploy "docs/my notes"; cat guide.md', lines: ['docs/my notes/a.md:3:deploy', '# Guide', '12: items'] },
     // the pattern given with -e and a context value before the file
     { command: 'grep -n -A 2 -e "release notes" "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:x', '# Guide', 'release notes:12: deploy'] },
+    // ag's -t takes no value (all text files), while rg's -t takes a file type
+    { command: 'ag --nogroup --filename --nocolor -t deploy "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:deploy', '# Guide', '12: items'] },
+    { command: 'rg -n -t md "two words" "docs/a b"; cat guide.md', lines: ['docs/a b/x.md:3:two words', '# Guide', '12: items'] },
   ]
 
   for (const { command, lines } of cases) {

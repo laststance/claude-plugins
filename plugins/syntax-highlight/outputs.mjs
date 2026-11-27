@@ -400,14 +400,31 @@ const operandsOf = args => {
   return [...before.filter(arg => !arg.startsWith('-')), ...(end === -1 ? [] : args.slice(end + 1))]
 }
 
-// grep, rg and ag flags that take the next word as their value; of those, -e and -f give the pattern
-const GREP_VALUE_FLAGS = new Set(['-e', '-f', '-A', '-B', '-C', '-m', '-g', '-t', '-T', '--regexp', '--file', '--after-context', '--before-context', '--context', '--max-count', '--glob', '--iglob', '--type', '--type-not', '--include', '--exclude', '--exclude-dir'])
+// flags that take a value, by program, and those of them that give the pattern (ag has none: its -f follows links)
+const GREP_FLAGS = {
+  grep: {
+    values: ['-e', '-f', '-d', '-D', '--regexp', '--file', '--include', '--exclude', '--exclude-dir', '--label', '--binary-files', '--devices', '--directories', '--max-depth', '--threads'],
+    patterns: ['-e', '-f', '--regexp', '--file'],
+  },
+  rg: {
+    values: ['-e', '-f', '-g', '-t', '-T', '-j', '-M', '-E', '-r', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--threads', '--max-columns', '--encoding', '--replace', '--max-depth', '--sort', '--sortr', '--pre', '--pre-glob'],
+    patterns: ['-e', '-f', '--regexp', '--file'],
+  },
+  ag: {
+    values: ['-G', '-g', '-p', '--ignore', '--ignore-dir', '--depth', '--pager', '--path-to-ignore', '--file-search-regex'],
+    patterns: [],
+  },
+}
+// context and count flags take a number in every grep; ag's can go without one, so only a number is taken as theirs
+const COUNT_FLAGS = new Set(['-A', '-B', '-C', '-m', '--after-context', '--before-context', '--context', '--max-count', '--after', '--before'])
 
 /**
  * The files and folders a grep searches: its words that are not flags, flag values or the pattern.
  *
- * The pattern is the value of `-e` or `-f` (alone, joined as `-efoo` or `--regexp=foo`, or last in a group such as
- * `-ne`), else the first word that is no flag; `--` ends the flags. Called by {@link planOutput}.
+ * Flags are read as getopt reads them, with each program's own table (rg's `-t` takes a file type, ag's takes nothing):
+ * in a group of short flags, the first that takes a value takes the rest of the group (`-efoo`) or else the next word
+ * (`-ne foo`); a long flag takes the next word unless joined with `=`; `--` ends the flags. The pattern is the value of
+ * `-e` or `-f`, else the first word left. Called by {@link planOutput}.
  *
  * @param program - A grep, rg, ag or git grep program, from programOf.
  * @returns the searched names, in order
@@ -415,6 +432,10 @@ const GREP_VALUE_FLAGS = new Set(['-e', '-f', '-A', '-B', '-C', '-m', '-g', '-t'
  * searchedOf({ name: 'grep', args: ['-n', 'release notes', 'src/app.ts'] }) // => ['src/app.ts']
  */
 const searchedOf = program => {
+  const { values, patterns } = GREP_FLAGS[program.name === 'rg' || program.name === 'ag' ? program.name : 'grep']
+  const takesValue = flag => values.includes(flag) || COUNT_FLAGS.has(flag)
+  // a count flag takes the next word only when it is a number
+  const takesNext = (flag, next) => !COUNT_FLAGS.has(flag) || /^\d+$/.test(next ?? '')
   // git grep's words start after its subcommand
   const args = program.name === 'git' ? program.args.slice(program.args.indexOf('grep') + 1) : program.args
   const words = []
@@ -425,14 +446,24 @@ const searchedOf = program => {
       words.push(...args.slice(k + 1))
       break
     }
-    const takesPatternNext = arg === '-e' || arg === '-f' || arg === '--regexp' || arg === '--file' || /^-[A-Za-z]+[ef]$/.test(arg)
-    if (takesPatternNext || /^-[ef]./.test(arg) || /^--(regexp|file)=/.test(arg)) hasPatternFlag = true
-    // a flag's value is no searched name
-    if (takesPatternNext || GREP_VALUE_FLAGS.has(arg)) {
-      k++
+    if (arg.startsWith('--')) {
+      const flag = arg.split('=')[0]
+      if (patterns.includes(flag)) hasPatternFlag = true
+      if (takesValue(flag) && !arg.includes('=') && takesNext(flag, args[k + 1])) k++
       continue
     }
-    if (!arg.startsWith('-')) words.push(arg)
+    if (arg.startsWith('-') && arg.length > 1) {
+      // a group of short flags: the first that takes a value takes the rest of the group, or else the next word
+      for (let c = 1; c < arg.length; c++) {
+        const flag = `-${arg[c]}`
+        if (!takesValue(flag)) continue
+        if (patterns.includes(flag)) hasPatternFlag = true
+        if (c === arg.length - 1 && takesNext(flag, args[k + 1])) k++
+        break
+      }
+      continue
+    }
+    words.push(arg)
   }
   // without -e or -f, the first word is the pattern
   return hasPatternFlag ? words : words.slice(1)
