@@ -2,7 +2,7 @@
 
 Found a library bug while working on its consumer? Run `/move-project ../library-b` in Claude Code. A fresh session opens in the library in the same terminal, with the conversation, tool calls, and tool results from the consumer. The library supplies the new session's project instructions, hooks, permissions, and environment.
 
-Requires the Claude Code terminal CLI (tested with 2.1.332), Python 3.9 or later, and a POSIX terminal. The bundled shell integration uses zsh.
+Requires the Claude Code terminal CLI (tested with 2.1.332), Python 3.9 or later, and a terminal on macOS or Linux. The bundled shell integration uses zsh.
 
 ## Install
 
@@ -35,13 +35,13 @@ Open a new terminal or run `source ~/.zshrc`, then start `claude` in the consume
 
 An absolute path also works. For a name containing spaces, type `/move-project ../Library B`. The destination is resolved against Claude's current working directory. A missing directory or unreadable conversation leaves the original session open.
 
-Once the archive is ready, the plugin exits the source session. The launcher starts Claude in the destination using the parent shell environment. The normal trust dialog applies to an unfamiliar repository. The source session stays available through `claude --resume` in its original project.
+Once the archive is ready, the plugin exits the source session. The launcher starts Claude in the destination using the parent shell environment. If you set `CLAUDE_CONFIG_DIR` and want the same user configuration across projects, use an absolute path. A relative value resolves in the new directory as it would after a shell `cd`. The normal trust dialog applies to an unfamiliar repository. The source session stays available through `claude --resume` in its original project.
 
 ### What the destination receives
 
 At move time the plugin reads Claude Code's existing transcript. It follows the active conversation through rewinds and compaction to recover the original user and assistant messages and the recorded tool calls, arguments, results, and errors. It omits abandoned branches, compaction summaries, internal requests, and automatically injected project instructions. A quotation in a message or tool result remains part of that message. A tool that originally recorded a preview or a file reference carries that recorded result.
 
-The destination receives the past conversation as labeled history in its opening prompt. Your next message starts a normal turn. The plugin retains a complete UTF-8 JSONL archive, with one role and content record per line, under `${CLAUDE_CONFIG_DIR:-~/.claude}/move-project/handoffs/`. The terminal prints its exact path. The private archive directory has mode `0700` and the file has mode `0600`. Archives remain available to resumed sessions until you delete them.
+The destination receives the past conversation as labeled history in its opening prompt. This starts a normal model turn with the destination's tool permissions. The prompt asks Claude to wait for your next task. The plugin retains a complete UTF-8 JSONL archive, with one role and content record per line, under `${CLAUDE_CONFIG_DIR:-~/.claude}/move-project/handoffs/`. The terminal prints its exact path. The private archive directory has mode `0700` and the file has mode `0600`. Archives remain available to resumed sessions until you delete them. If you move again after a file-only handoff, the next archive contains the earlier file's path. Keep that earlier archive to access its full history.
 
 The launcher passes a short prompt with the archive path. After the destination project has loaded, its plugin includes the full text in the first model request when it fits. It budgets one token per UTF-8 byte plus 1,024 tokens for the handoff and can read up to 4 MiB inline. For larger archives, or when the destination plugin is disabled or cannot measure free context, Claude receives the archive path for search and range reads. Ordinary file permissions in the destination apply. The handoff itself makes no model call for summarization.
 

@@ -90,6 +90,10 @@ class TranscriptTests(unittest.TestCase):
         self.assertEqual(history, [{"role": "user", "content": "Keep"}])
 
     def test_local_command_and_hook_envelopes_are_removed_but_literal_user_markup_is_preserved(self):
+        # Value: protects=Mixed harness envelopes export only their recorded tool results;
+        # fails_when=the exporter discards the result or leaks adjacent project instructions;
+        # why_new=the previous fixture only supplied machine-authored strings;
+        # seam=none; no_claim=the transcript fixture uses the known envelope format.
         # Arrange: the CLI's /compact marker and stdout are user rows with the caveat's prompt ID.
         rows = [
             entry("1", None, "user", "<local-command-caveat>harness</local-command-caveat>",
@@ -100,11 +104,36 @@ class TranscriptTests(unittest.TestCase):
                   promptId="user-id", rowSource="local", promptSource="sdk"),
             entry("5", "4", "user", "hook instruction", rowSource="harness"),
             entry("6", "5", "user", "injected by project plugin", origin={"kind": "plugin", "name": "project-rule"}),
+            entry("7", "6", "user", [
+                {"type": "text", "text": "A-only hook instruction"},
+                {"type": "tool_result", "tool_use_id": "read-A", "content": "recorded file result"},
+            ], rowSource="harness"),
         ]
         # Act
         history = self.run_export(rows)
         # Assert
-        self.assertEqual(history, [{"role": "user", "content": "<local-command-stdout>quoted value</local-command-stdout>"}])
+        self.assertEqual(history, [
+            {"role": "user", "content": "<local-command-stdout>quoted value</local-command-stdout>"},
+            {"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": "read-A", "content": "recorded file result"},
+            ]},
+        ])
+
+    def test_incomplete_journal_refuses_to_export_a_plausible_but_truncated_history(self):
+        # Value: protects=An incomplete JSON line blocks transfer of the earlier valid turns;
+        # fails_when=the reader silently skips a partially written final record;
+        # why_new=missing ancestry tests use valid JSON and cannot detect skipped lines;
+        # seam=none; no_claim=the fixture simulates the observed bytes during a write.
+        # Arrange
+        first = json.dumps(entry("1", None, "user", "Already persisted"))
+        self.journal.write_text(first + '\n{"uuid":', encoding="utf-8")
+
+        # Act
+        with self.assertRaisesRegex(ValueError, "Invalid transcript JSON at line 2"):
+            export_history(self.journal, self.output, tip="1")
+
+        # Assert
+        self.assertFalse(self.output.exists())
 
     def test_parallel_call_arguments_and_results_stay_in_order_across_sibling_parents(self):
         # Arrange
