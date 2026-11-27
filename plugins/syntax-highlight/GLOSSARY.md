@@ -21,3 +21,11 @@ _Avoid_: format, file type, syntax
 **Output shape**:
 The fixed layout one command prints a line in, such as an `ls -l` entry, a `grep -n` hit (`path:line:`) or a `plutil -p` pair (`"key" => "value"`). It is recognised line by line, so one Output block can hold several.
 _Avoid_: format, output format, pattern
+
+**Strong form**:
+The rows of an Output shape that nothing but its command prints, such as an `ls -l` mode string or a `path:12:` hit. Inside a Language block only a strong form takes the shape; the looser rows (a line ending in `:`, a bare `12:`) stay in the Language.
+_Avoid_: strict pattern, exact match
+
+**Sibling row**:
+A row Claude Code draws under an Output block from the same result: the "Shell cwd was reset" notice, stderr, the diff of files the command changed, images it viewed. This mod colours the Output block and leaves sibling rows to Claude Code.
+_Avoid_: extra row, footer, stderr block

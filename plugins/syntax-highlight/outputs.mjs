@@ -9,6 +9,8 @@ import { lex, programOf } from './shell.mjs'
  * @property {string | null} language - Language of the whole block, as a language id or file extension the worker
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
+ * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
+ * @property {string[]} grepped - The files and folders with a space in their name a grep in the command searches.
  */
 
 // ---------- Output shapes ----------
@@ -23,15 +25,21 @@ const PLUTIL_VALUE = [
 
 /**
  * The Output shapes, in the order a line is tested against them. `programs` turn a shape on when the command runs one
- * of them; `line` says whether a line has the shape; `patterns` colour such a line (TextMate rules, one line at a time).
- * The regex sources are written once and read by both JavaScript and oniguruma, so they keep to syntax both share.
+ * of them. Whether a line has the shape is two tests: `strong`, the rows nothing but this command prints (an `ls -l`
+ * mode string, a `path:12:` hit), and `weak`, the looser rows prose can look like (a line ending in `:`, a bare `12:`),
+ * or null. In a block with a Language only `strong` counts, so prose stays in the Language; without one, `strong` or
+ * `weak` does. Each runs in linear time: the render hook tests every line synchronously, up to 200,000 characters.
+ * `patterns` colour such a line (TextMate rules, one line at a time); their regex sources are read by both JavaScript
+ * and oniguruma, so they keep to syntax both share.
  */
 const SHAPES = [
   {
     id: 'ls',
     // `ls -l` / `ls -la`: mode, links, owner, group, size, date, name; `total N`; `dir:` headers of a multi-folder list
     programs: ['ls', 'gls'],
-    line: /^(?:[-bcdlpsD][-rwxsStT]{9}[@+.]?\s+\d+\s|total \d|\S.*:$)/,
+    strong: /^(?:[-bcdlpsD][-rwxsStT]{9}[@+.]?\s+\d+\s|total \d+$)/,
+    // `total` followed by more, and a `dir:` header, which any prose line ending in `:` also looks like
+    weak: /^(?:total \d|\S.*:$)/,
     patterns: [
       { match: '^(total)(\\s+)(\\S+)$', captures: { 1: { name: 'keyword.other.total.ls' }, 3: { name: 'constant.numeric.ls' } } },
       ...['d', 'l', 'x', 'f'].map(kind => ({
@@ -57,7 +65,8 @@ const SHAPES = [
     id: 'plutil',
     // `plutil -p`: `"key" => value` and `0 => value`
     programs: ['plutil'],
-    line: /^\s*(?:"(?:[^"\\]|\\.)*"|\d+) => /,
+    strong: /^\s*(?:"(?:[^"\\]|\\.)*"|\d+) => /,
+    weak: null,
     patterns: [
       {
         match: `^(\\s*)(${STRING})( => )(.*)$`,
@@ -73,7 +82,12 @@ const SHAPES = [
     id: 'git-status',
     // `git status --short` (`XY path`, `## branch...upstream [ahead 1]`) and the long form's `modified:   path` rows
     programs: ['git status'],
-    line: /^(?:[ MTADRCU?!]{2} \S|## \S|\t(?:modified|new file|deleted|renamed|typechange|both modified|both added):\s|On branch \S)/,
+    // `XY path` with a status letter and nothing after the path but a rename's `-> path` (git quotes a path with a
+    // space), `## branch...upstream` (dot-separated branch parts keep it linear), long-form rows
+    strong: /^(?:(?:[MTADRCU?!][ MTADRCU?!]| [MTADRCU?!]) (?:"(?:[^"\\]|\\.)*"|[^\s"]\S*)(?: -> (?:"(?:[^"\\]|\\.)*"|[^\s"]\S*))?$|## [^\s.]+(?:\.[^\s.]+)*\.\.\.\S+(?: \[[^\]]+\])?$|\t(?:modified|new file|deleted|renamed|typechange|both modified|both added):\s|On branch \S+$)/,
+    // status letters before more words, which prose (`MR 12 is merged`) and a diff's context line (` A simple
+    // approach`) also are; a blank status; `## branch` with no upstream, which a Markdown heading (`## Usage`) also is
+    weak: /^(?:[MTADRCU?!][ MTADRCU?!] \S| [MTADRCU?!] \S| {3}\S|## \S|On branch \S)/,
     patterns: [
       {
         match: '^([ MTADRCU?!])([ MTADRCU?!])( )(.*)$',
@@ -94,7 +108,14 @@ const SHAPES = [
     id: 'wc',
     // `wc -l a b`: counts, then the name (`total` for the sum)
     programs: ['wc'],
-    line: /^\s*\d+(?:\s+\d+)*(?:\s+\S.*)?$/,
+    // a first count whose spaces and digits fill exactly 8 columns, as BSD wc pads it (` %7d`), before any name
+    // (`release notes.md` too), or counts before a
+    // path-like name or `total`; a count indented less and followed by a word (`  3 items`) is prose. The name is read
+    // with [^\n] and not `.`, which stops at a \r or U+2028 a line can hold and makes the counts before it backtrack
+    // quadratically
+    strong: /^(?:(?=(?: {7}\d| {6}\d{2}| {5}\d{3}| {4}\d{4}| {3}\d{5}| {2}\d{6}| \d{7}| \d{8,})(?:\s|$)) *\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
+    // any line of counts and text, which `2 deployments failed` also is
+    weak: /^\s*\d+(?:\s+\d+)*(?:\s+\S[^\n]*)?$/,
     patterns: [
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)(\\s+)(total)$', captures: { 2: { name: 'constant.numeric.count.wc' }, 4: { name: 'keyword.other.total.wc' } } },
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)', captures: { 2: { name: 'constant.numeric.count.wc' } } },
@@ -105,7 +126,10 @@ const SHAPES = [
     // `grep -n` / `rg`: `path:line:text`, context rows `path-line-text`, `path:text` across files, `line:text` in one
     // file, `--` between groups
     programs: ['grep', 'egrep', 'fgrep', 'ggrep', 'rg', 'ag', 'git grep'],
-    line: /^(?:[^:\s][^:]*?[:-]\d+[:-]|[^:\s]*\/[^:]*:|[^:\s/]+\.[A-Za-z0-9]+:|\d+[:-]|--$)/,
+    // `path:line:` where the path has a `/` or `.` (the first class leaves out `./`, so the match is linear)
+    strong: /^[^:\s./]*[./][^:\s]*:\d+:/,
+    // context rows, `path:` without a line, a bare `12:` from one file, `--`: dates, times and `7-day` look the same
+    weak: /^(?:[^:\s][^:]*?[:-]\d+[:-]|[^:\s/]*\/[^:]*:|[^:\s/]+\.[A-Za-z0-9]+:|\d+[:-]|--$)/,
     patterns: [
       { match: '^(--)$', captures: { 1: { name: 'comment.separator.grep' } } },
       {
@@ -170,11 +194,16 @@ const sharedExtension = files => {
   return [...exts][0]
 }
 
-/** The words of `args` that name files: not flags, and not the values of flags that take one. */
+/** The words of `args` that name files: not flags, and not the values of flags that take one; after `--`, all. */
 const fileArgs = args => {
   const files = []
   for (let k = 0; k < args.length; k++) {
     const a = args[k]
+    // `--` ends the flags: every word after it is a file, `-notes.md` too
+    if (a === '--') {
+      files.push(...args.slice(k + 1))
+      break
+    }
     if (VALUE_FLAGS.has(a)) { k++; continue }
     if (a === '-' || a.startsWith('-') || a.startsWith('+')) continue
     files.push(a)
@@ -260,16 +289,22 @@ const languageOf = (program, fed) => {
  */
 export const planOutput = (command, output) => {
   const segments = command.trim() === '' ? [] : lex(command)
-  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS }
+  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [], grepped: [] }
 
   const names = new Set()
   const printed = new Set()
+  const counted = []
+  const grepped = []
   let fed = null
   for (const seg of segments) {
     const program = programOf(seg)
     const isPiped = seg.op === '|' || seg.op === '|&'
     if (program !== null) {
       for (const name of namesOf(program)) names.add(name)
+      // wc's own flags take no value, so every other word is a file it counts
+      if (program.name === 'wc') counted.push(...operandsOf(program.args))
+      // a grep's hits name its files, and the strong form takes no name with a space: those the command gave it are known
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => /\s/.test(arg)))
       fed = languageOf(program, fed)
     }
     // the last stage of a pipeline prints; a silent command prints nothing
@@ -282,7 +317,54 @@ export const planOutput = (command, output) => {
   const languages = [...printed].filter(lang => lang !== null)
   const language = languages.length === 1 ? languages[0] : languages.length === 0 ? sniffJson(output) : null
   const shapes = SHAPES.filter(shape => shape.programs.some(name => names.has(name))).map(shape => shape.id)
-  return { language, shapes }
+  return { language, shapes, counted, grepped }
+}
+
+/**
+ * Whether the command prints its Language's text more than once with another program's Output-shape rows between the
+ * prints (`head -n 1 a.ts; git status --short; cat b.ts`).
+ *
+ * The worker then starts the Language's grammar afresh after such rows, since each later print is a file of its own:
+ * the first file's state (an open comment) must not run into it, and its frontmatter must open it. With one print, a
+ * row of a shape inside it is the file's own text (an example in a fenced block), so the state runs on across it.
+ * With several prints, a shape row inside one of the files (a git status line in a comment) restarts the grammar too:
+ * the output does not say where each print ends.
+ * Called by tokenize.mjs.
+ *
+ * @param command - The shell command the Bash call ran, or '' when unknown.
+ * @returns true when a print of another program's Output shapes sits between two prints of the Language
+ * @example
+ * readsApart('cat a.md; wc -l b.md; cat b.md') // => true
+ * readsApart('wc -l *.md && cat guide.md') // => false
+ */
+export const readsApart = command => {
+  const segments = command.trim() === '' ? [] : lex(command)
+  const shapePrograms = new Set(SHAPES.flatMap(shape => shape.programs))
+  let hasPrintedLanguage = false
+  let hasShapesSince = false
+  let fed = null
+  let names = []
+  for (const seg of segments) {
+    const program = programOf(seg)
+    if (program !== null) {
+      fed = languageOf(program, fed)
+      names.push(...namesOf(program))
+    }
+    // only the last stage of a pipeline prints
+    if (seg.op === '|' || seg.op === '|&') continue
+    const prints = program !== null && !SILENT.has(program.name)
+    if (prints && fed !== null) {
+      // the Language printed again after another program's rows: a file of its own
+      if (hasPrintedLanguage && hasShapesSince) return true
+      hasPrintedLanguage = true
+      hasShapesSince = false
+    } else if (prints && names.some(name => shapePrograms.has(name))) {
+      hasShapesSince = hasPrintedLanguage
+    }
+    fed = null
+    names = []
+  }
+  return false
 }
 
 /** Blocks past this size are not parsed to see whether they are JSON. */
@@ -300,21 +382,169 @@ const sniffJson = output => {
 /** What {@link assignLines} gives a line drawn in the block's Language. */
 export const BLOCK = 'block'
 
+/** The programs whose hits the `grep` shape colours, from its entry in {@link SHAPES}. */
+const GREP_PROGRAMS = new Set(SHAPES.find(shape => shape.id === 'grep').programs)
+
+/**
+ * The words of a command that are not flags: every word after `--`, which ends the flags (`wc -l -- -notes.md`), and the
+ * words before it that do not open with `-`. Called by {@link planOutput}.
+ *
+ * @param args - A program's words after its name.
+ * @returns the words, in order
+ * @example
+ * operandsOf(['-l', '--', '-notes.md']) // => ['-notes.md']
+ */
+const operandsOf = args => {
+  const end = args.indexOf('--')
+  const before = end === -1 ? args : args.slice(0, end)
+  return [...before.filter(arg => !arg.startsWith('-')), ...(end === -1 ? [] : args.slice(end + 1))]
+}
+
+// flags that take a value, by program, and those of them that give the pattern (ag has none: its -f follows links)
+const GREP_FLAGS = {
+  grep: {
+    values: ['-e', '-f', '-d', '-D', '--regexp', '--file', '--include', '--exclude', '--exclude-dir', '--label', '--binary-files', '--devices', '--directories', '--max-depth', '--threads'],
+    patterns: ['-e', '-f', '--regexp', '--file'],
+  },
+  rg: {
+    values: ['-e', '-f', '-g', '-t', '-T', '-j', '-M', '-E', '-r', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--threads', '--max-columns', '--encoding', '--replace', '--max-depth', '--sort', '--sortr', '--pre', '--pre-glob'],
+    patterns: ['-e', '-f', '--regexp', '--file'],
+  },
+  ag: {
+    values: ['-G', '-g', '-p', '--ignore', '--ignore-dir', '--depth', '--pager', '--path-to-ignore', '--file-search-regex'],
+    patterns: [],
+  },
+}
+// context and count flags take a number in every grep; ag's can go without one, so only a number is taken as theirs
+const COUNT_FLAGS = new Set(['-A', '-B', '-C', '-m', '--after-context', '--before-context', '--context', '--max-count', '--after', '--before'])
+
+/**
+ * The files and folders a grep searches: its words that are not flags, flag values or the pattern.
+ *
+ * Flags are read as getopt reads them, with each program's own table (rg's `-t` takes a file type, ag's takes nothing):
+ * in a group of short flags, the first that takes a value takes the rest of the group (`-efoo`) or else the next word
+ * (`-ne foo`); a long flag takes the next word unless joined with `=`; `--` ends the flags. The pattern is the value of
+ * `-e` or `-f`, else the first word left. Called by {@link planOutput}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns the searched names, in order
+ * @example
+ * searchedOf({ name: 'grep', args: ['-n', 'release notes', 'src/app.ts'] }) // => ['src/app.ts']
+ */
+const searchedOf = program => {
+  const { values, patterns } = GREP_FLAGS[program.name === 'rg' || program.name === 'ag' ? program.name : 'grep']
+  const takesValue = flag => values.includes(flag) || COUNT_FLAGS.has(flag)
+  // a count flag takes the next word only when it is a number
+  const takesNext = (flag, next) => !COUNT_FLAGS.has(flag) || /^\d+$/.test(next ?? '')
+  // git grep's words start after its subcommand
+  const args = program.name === 'git' ? program.args.slice(program.args.indexOf('grep') + 1) : program.args
+  const words = []
+  let hasPatternFlag = false
+  for (let k = 0; k < args.length; k++) {
+    const arg = args[k]
+    if (arg === '--') {
+      words.push(...args.slice(k + 1))
+      break
+    }
+    if (arg.startsWith('--')) {
+      const flag = arg.split('=')[0]
+      if (patterns.includes(flag)) hasPatternFlag = true
+      if (takesValue(flag) && !arg.includes('=') && takesNext(flag, args[k + 1])) k++
+      continue
+    }
+    if (arg.startsWith('-') && arg.length > 1) {
+      // a group of short flags: the first that takes a value takes the rest of the group, or else the next word
+      for (let c = 1; c < arg.length; c++) {
+        const flag = `-${arg[c]}`
+        if (!takesValue(flag)) continue
+        if (patterns.includes(flag)) hasPatternFlag = true
+        if (c === arg.length - 1 && takesNext(flag, args[k + 1])) k++
+        break
+      }
+      continue
+    }
+    words.push(arg)
+  }
+  // without -e or -f, the first word is the pattern
+  return hasPatternFlag ? words : words.slice(1)
+}
+
+/**
+ * Whether a line is a grep hit in a file or folder with a space in its name that the command gave the grep:
+ * `src/release notes.ts:12:` or, under a folder, `docs/my notes/a.md:3:`, with `-` for context rows.
+ *
+ * The strong form takes no path with a space, as prose can hold one before a colon; the command naming the file tells
+ * them apart. Each check reads the line once. Called by {@link assignLines}.
+ *
+ * @param line - A line of the block.
+ * @param grepped - The names with a space the command gave a grep, from {@link planOutput}.
+ * @returns true when the line is a hit in one of them
+ * @example
+ * isHitOf('src/release notes.ts:12:deploy', new Set(['src/release notes.ts'])) // => true
+ */
+const isHitOf = (line, grepped) => {
+  for (const name of grepped) {
+    if (!line.startsWith(name)) continue
+    const rest = line.slice(name.length)
+    // the line number right after the name, or a path under the named folder before it
+    if (/^[:-]\d+[:-]/.test(rest) || /^\/[^:\n]*[:-]\d+[:-]/.test(rest)) return true
+  }
+  return false
+}
+
+/**
+ * Whether a line is wc's row for a file the command gave it: counts, then that file's name as written.
+ *
+ * GNU wc writes a lone file's count unpadded (`7 release notes.md`), which the `wc` shape's strong form does not take
+ * when the name has a space or no `.` or `/` (prose looks the same). The command naming the file tells them apart.
+ * The name is matched at the line's end, so one that opens with a number (`7 2026 notes.md`) is found too, and each
+ * check reads the line once. Called by {@link assignLines}.
+ *
+ * @param line - A line of the block.
+ * @param counted - The files the command gave `wc`, from {@link planOutput}.
+ * @returns true when the line counts one of those files
+ * @example
+ * isCountOf('7 release notes.md', new Set(['release notes.md'])) // => true
+ * isCountOf('7 2026 notes.md', new Set(['2026 notes.md'])) // => true
+ * isCountOf('7 release notes', new Set(['release notes.md'])) // => false
+ */
+const isCountOf = (line, counted) => {
+  // a row that does not open with a count is no wc row, whatever names follow
+  if (!/^\s*\d/.test(line)) return false
+  for (const name of counted) {
+    if (!line.endsWith(name)) continue
+    const counts = line.slice(0, line.length - name.length)
+    // before the name: digits and spaces only, at least one count, and a space before the name
+    if (/\s$/.test(counts) && /\d/.test(counts) && !/[^\d\s]/.test(counts)) return true
+  }
+  return false
+}
+
 /**
  * Gives each line of an Output block what colours it: the first Output shape of the plan it has, else the block's
  * Language, else nothing.
  *
+ * Called by the hooks module (through {@link hasColour}) and by the worker, so both read a block the same way. In a
+ * block with a Language a line takes a shape only by its `strong` test: `metadata:` or `## Usage` in a Markdown file
+ * stays Markdown even when the command also ran `ls` or `git status`.
+ *
  * @param lines - The block's lines.
- * @param plan - From {@link planOutput}.
+ * @param plan - From {@link planOutput}; the worker passes `language: null` when the Language has no grammar.
  * @returns per line, an Output shape's scope (`text.output.ls`), {@link BLOCK}, or null for a line left as it is
  * @example
  * assignLines(['  95 a.md', '# Title'], { language: 'md', shapes: ['wc'] })
  * // => ['text.output.wc', 'block']
+ * assignLines(['metadata:'], { language: 'md', shapes: ['ls'] })
+ * // => ['block']
  */
 export const assignLines = (lines, plan) => {
   const shapes = plan.shapes.map(id => SHAPE_BY_ID.get(id)).filter(Boolean)
+  // with a Language, only rows nothing but the command prints take a shape; prose stays in the Language
+  const isStrongOnly = plan.language !== null
+  const counted = new Set(plan.counted ?? [])
+  const grepped = new Set(plan.grepped ?? [])
   return lines.map(line => {
-    const shape = shapes.find(s => s.line.test(line))
+    const shape = shapes.find(s => s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted)) || (s.id === 'grep' && isHitOf(line, grepped)) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
     if (shape) return shapeScope(shape.id)
     return plan.language === null ? null : BLOCK
   })
