@@ -382,8 +382,8 @@ const sniffJson = output => {
 /** What {@link assignLines} gives a line drawn in the block's Language. */
 export const BLOCK = 'block'
 
-/** The programs whose hits the `grep` shape colours. */
-const GREP_PROGRAMS = new Set(['grep', 'egrep', 'fgrep', 'ggrep', 'rg', 'ag', 'git grep'])
+/** The programs whose hits the `grep` shape colours, from its entry in {@link SHAPES}. */
+const GREP_PROGRAMS = new Set(SHAPES.find(shape => shape.id === 'grep').programs)
 
 /**
  * The words of a command that are not flags: every word after `--`, which ends the flags (`wc -l -- -notes.md`), and the
