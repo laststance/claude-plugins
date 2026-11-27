@@ -23,15 +23,21 @@ const PLUTIL_VALUE = [
 
 /**
  * The Output shapes, in the order a line is tested against them. `programs` turn a shape on when the command runs one
- * of them; `line` says whether a line has the shape; `patterns` colour such a line (TextMate rules, one line at a time).
- * The regex sources are written once and read by both JavaScript and oniguruma, so they keep to syntax both share.
+ * of them. Whether a line has the shape is two tests: `strong`, the rows nothing but this command prints (an `ls -l`
+ * mode string, a `path:12:` hit), and `weak`, the looser rows prose can look like (a line ending in `:`, a bare `12:`),
+ * or null. In a block with a Language only `strong` counts, so prose stays in the Language; without one, `strong` or
+ * `weak` does. Each runs in linear time: the render hook tests every line synchronously, up to 200,000 characters.
+ * `patterns` colour such a line (TextMate rules, one line at a time); their regex sources are read by both JavaScript
+ * and oniguruma, so they keep to syntax both share.
  */
 const SHAPES = [
   {
     id: 'ls',
     // `ls -l` / `ls -la`: mode, links, owner, group, size, date, name; `total N`; `dir:` headers of a multi-folder list
     programs: ['ls', 'gls'],
-    line: /^(?:[-bcdlpsD][-rwxsStT]{9}[@+.]?\s+\d+\s|total \d|\S.*:$)/,
+    strong: /^(?:[-bcdlpsD][-rwxsStT]{9}[@+.]?\s+\d+\s|total \d+$)/,
+    // `total` followed by more, and a `dir:` header, which any prose line ending in `:` also looks like
+    weak: /^(?:total \d|\S.*:$)/,
     patterns: [
       { match: '^(total)(\\s+)(\\S+)$', captures: { 1: { name: 'keyword.other.total.ls' }, 3: { name: 'constant.numeric.ls' } } },
       ...['d', 'l', 'x', 'f'].map(kind => ({
@@ -57,7 +63,8 @@ const SHAPES = [
     id: 'plutil',
     // `plutil -p`: `"key" => value` and `0 => value`
     programs: ['plutil'],
-    line: /^\s*(?:"(?:[^"\\]|\\.)*"|\d+) => /,
+    strong: /^\s*(?:"(?:[^"\\]|\\.)*"|\d+) => /,
+    weak: null,
     patterns: [
       {
         match: `^(\\s*)(${STRING})( => )(.*)$`,
@@ -73,7 +80,12 @@ const SHAPES = [
     id: 'git-status',
     // `git status --short` (`XY path`, `## branch...upstream [ahead 1]`) and the long form's `modified:   path` rows
     programs: ['git status'],
-    line: /^(?:[ MTADRCU?!]{2} \S|## \S|\t(?:modified|new file|deleted|renamed|typechange|both modified|both added):\s|On branch \S)/,
+    // `XY path` with a status letter and nothing after the path but a rename's `-> path` (git quotes a path with a
+    // space), `## branch...upstream` (dot-separated branch parts keep it linear), long-form rows
+    strong: /^(?:(?:[MTADRCU?!][ MTADRCU?!]| [MTADRCU?!]) (?:"(?:[^"\\]|\\.)*"|[^\s"]\S*)(?: -> (?:"(?:[^"\\]|\\.)*"|[^\s"]\S*))?$|## [^\s.]+(?:\.[^\s.]+)*\.\.\.\S+(?: \[[^\]]+\])?$|\t(?:modified|new file|deleted|renamed|typechange|both modified|both added):\s|On branch \S+$)/,
+    // status letters before more words, which prose (`MR 12 is merged`) and a diff's context line (` A simple
+    // approach`) also are; a blank status; `## branch` with no upstream, which a Markdown heading (`## Usage`) also is
+    weak: /^(?:[MTADRCU?!][ MTADRCU?!] \S| [MTADRCU?!] \S| {3}\S|## \S|On branch \S)/,
     patterns: [
       {
         match: '^([ MTADRCU?!])([ MTADRCU?!])( )(.*)$',
@@ -94,7 +106,11 @@ const SHAPES = [
     id: 'wc',
     // `wc -l a b`: counts, then the name (`total` for the sum)
     programs: ['wc'],
-    line: /^\s*\d+(?:\s+\d+)*(?:\s+\S.*)?$/,
+    // counts right-aligned in 8 columns, as BSD wc pads them, or counts before a path-like name or `total`; a count
+    // indented less and followed by a word (`  3 items`) is prose
+    strong: /^(?:(?=[ \d]{8}) *\d+(?:\s+\d+)*(?:\s+\S+)?|\s*\d+(?:\s+\d+)*\s+(?:[^\s./]*[./]\S*|total))$/,
+    // any line of counts and text, which `2 deployments failed` also is
+    weak: /^\s*\d+(?:\s+\d+)*(?:\s+\S.*)?$/,
     patterns: [
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)(\\s+)(total)$', captures: { 2: { name: 'constant.numeric.count.wc' }, 4: { name: 'keyword.other.total.wc' } } },
       { match: '^(\\s*)(\\d+(?:\\s+\\d+)*)', captures: { 2: { name: 'constant.numeric.count.wc' } } },
@@ -105,7 +121,10 @@ const SHAPES = [
     // `grep -n` / `rg`: `path:line:text`, context rows `path-line-text`, `path:text` across files, `line:text` in one
     // file, `--` between groups
     programs: ['grep', 'egrep', 'fgrep', 'ggrep', 'rg', 'ag', 'git grep'],
-    line: /^(?:[^:\s][^:]*?[:-]\d+[:-]|[^:\s]*\/[^:]*:|[^:\s/]+\.[A-Za-z0-9]+:|\d+[:-]|--$)/,
+    // `path:line:` where the path has a `/` or `.` (the first class leaves out `./`, so the match is linear)
+    strong: /^[^:\s./]*[./][^:\s]*:\d+:/,
+    // context rows, `path:` without a line, a bare `12:` from one file, `--`: dates, times and `7-day` look the same
+    weak: /^(?:[^:\s][^:]*?[:-]\d+[:-]|[^:\s/]*\/[^:]*:|[^:\s/]+\.[A-Za-z0-9]+:|\d+[:-]|--$)/,
     patterns: [
       { match: '^(--)$', captures: { 1: { name: 'comment.separator.grep' } } },
       {
@@ -304,17 +323,25 @@ export const BLOCK = 'block'
  * Gives each line of an Output block what colours it: the first Output shape of the plan it has, else the block's
  * Language, else nothing.
  *
+ * Called by the hooks module (through {@link hasColour}) and by the worker, so both read a block the same way. In a
+ * block with a Language a line takes a shape only by its `strong` test: `metadata:` or `## Usage` in a Markdown file
+ * stays Markdown even when the command also ran `ls` or `git status`.
+ *
  * @param lines - The block's lines.
- * @param plan - From {@link planOutput}.
+ * @param plan - From {@link planOutput}; the worker passes `language: null` when the Language has no grammar.
  * @returns per line, an Output shape's scope (`text.output.ls`), {@link BLOCK}, or null for a line left as it is
  * @example
  * assignLines(['  95 a.md', '# Title'], { language: 'md', shapes: ['wc'] })
  * // => ['text.output.wc', 'block']
+ * assignLines(['metadata:'], { language: 'md', shapes: ['ls'] })
+ * // => ['block']
  */
 export const assignLines = (lines, plan) => {
   const shapes = plan.shapes.map(id => SHAPE_BY_ID.get(id)).filter(Boolean)
+  // with a Language, only rows nothing but the command prints take a shape; prose stays in the Language
+  const isStrongOnly = plan.language !== null
   return lines.map(line => {
-    const shape = shapes.find(s => s.line.test(line))
+    const shape = shapes.find(s => s.strong.test(line) || (!isStrongOnly && s.weak !== null && s.weak.test(line)))
     if (shape) return shapeScope(shape.id)
     return plan.language === null ? null : BLOCK
   })

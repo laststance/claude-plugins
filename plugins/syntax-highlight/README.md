@@ -47,7 +47,7 @@ Requires `node` on the PATH and Claude Code 2.1.287 or later (tested with 2.1.33
   | `git status` | `--short` status letters, `## branch...upstream`, `modified:` rows |
   | `wc` | counts and `total` |
 
-  A line with a shape keeps its colours inside a Language block, so `wc -l *.md && cat README.md` colours both.
+  Inside a Language block only rows nothing else prints keep their shape: an `ls -l` row, a `path:12:` hit, a `wc` row (counts padded to 8 columns, or before a name with a `.` or `/`, or `total`), a `git status --short` row of status letters and one path, `## branch...upstream`. So `wc -l *.md && cat README.md` colours both, while a heading (`## Usage`), a time (`09:30`), an indented number (`  3 items`), a line opening with status-like capitals (`MR 12 is merged`) or a frontmatter key ending in `:` stays in the Language.
 
 A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Blocks with stderr, errors, interrupts, images or background tasks are left to Claude Code. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
 
@@ -77,6 +77,17 @@ Which programs carry code, and in what language, lives in [`runners.json`](runne
 ```
 
 `language` is a TextMate scope (`source.lua`) or a short id (`lua`, `py`, `js`). `evalFlags` are flags whose next word is code (`evalPattern` takes a regex instead), `skipFlags` swallow one argument, `stopFlags` end the scan (like `-m`), `words` are subcommands to skip, `after` is a subcommand that precedes the code (`deno eval`).
+
+## Tests
+
+From the repository root:
+
+```sh
+claude plugin test plugins/syntax-highlight
+node --test plugins/syntax-highlight/tests/tokenize.test.mjs
+```
+
+The first runs the planning and rendering tests in Claude Code's mod test kit; the second runs the colouring worker (`tokenize.mjs`), a Node program the kit cannot start.
 
 ## Credits and licenses
 

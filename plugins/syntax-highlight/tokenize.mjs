@@ -186,14 +186,27 @@ if (input.output !== undefined) {
   const lines = src.split('\n')
   const plan = planOutput(String(input.command ?? ''), src)
   const blockScope = plan.language === null ? null : grammarIndex.languages[norm(plan.language)] ?? null
-  const scopes = assignLines(lines, plan).map(scope => (scope === BLOCK ? blockScope : scope))
+  // a Language with no grammar (`cat notes.zzunknown`) colours nothing, so the block is read as having none and keeps
+  // every Output shape's colours
+  const effectivePlan = blockScope === null ? { ...plan, language: null } : plan
+  const scopes = assignLines(lines, effectivePlan).map(scope => (scope === BLOCK ? blockScope : scope))
+  const firstLanguageLine = blockScope === null ? -1 : scopes.indexOf(blockScope)
+  if (firstLanguageLine !== -1) {
+    // the Language takes the block in one pass from its first line on, so its state (frontmatter, an open fence) runs
+    // on across the Output-shape rows inside it; those rows are coloured over it below. Rows before that first line
+    // are another command's output (`wc -l *.md && cat guide.md`): the pass starts after them, so the file's
+    // frontmatter still opens the Language's text
+    const start = lines.slice(0, firstLanguageLine).reduce((length, line) => length + line.length + 1, 0)
+    const whole = await tokenizeText(blockScope, src.slice(start))
+    for (let c = 0; c < whole.length; c++) styles[start + c] = whole[c]
+  }
   let offset = 0
   for (let k = 0; k < lines.length;) {
-    // a run of lines sharing a scope is tokenized as one text, so a Language keeps its state across them
+    // a run of lines sharing an Output shape is tokenized as one text with that shape's grammar
     let j = k
     while (j < lines.length && scopes[j] === scopes[k]) j++
     const text = lines.slice(k, j).join('\n')
-    if (scopes[k] !== null) {
+    if (scopes[k] !== null && scopes[k] !== blockScope) {
       const inner = await tokenizeText(scopes[k], text)
       for (let c = 0; c < inner.length; c++) styles[offset + c] = inner[c]
     }
