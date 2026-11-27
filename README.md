@@ -9,6 +9,7 @@ Claude Code plugins and mods by [Laststance.io](https://github.com/laststance). 
 | [always-expand](plugins/always-expand) | `/expand` toggles always-expanded tool output and thinking, as ctrl+o shows them | `/expand` |
 | [blackout](plugins/blackout) | Blanks Claude Code's screen down to the terminal background with one key, and back (Claude keeps working) | `/blackout` (`ctrl+space`) |
 | [desktop-notification](plugins/desktop-notification) | macOS notification when Claude Code needs you; a click brings your terminal forward | (hook) |
+| [move-project](plugins/move-project) | Opens another project in the same terminal with the conversation and tool results. Requires the bundled launcher. | `/move-project <directory>` |
 | [open-in-editor](plugins/open-in-editor) | Opens the session's project root in your editor of choice (macOS) | `/vscode` `/cursor` `/devin-desktop` `/webstorm` `/phpstorm` `/zed` |
 | [secret-guard](plugins/secret-guard) | Refuses shell commands that spell out a key or token, and masks secrets in tool results before Claude and the transcript get them | (mod) |
 | [serena-activate](plugins/serena-activate) | Briefs Claude on Serena in the system prompt and puts its tools in front, so it is used without being asked | (mod) |

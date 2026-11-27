@@ -1,0 +1,10 @@
+{
+  "name": "move-project",
+  "version": "0.1.0",
+  "description": "Move to another project in the same terminal with the original conversation and tool results.",
+  "author": { "name": "Laststance.io", "url": "https://github.com/laststance" },
+  "homepage": "https://github.com/laststance/claude-plugins/tree/main/plugins/move-project",
+  "repository": "https://github.com/laststance/claude-plugins",
+  "license": "MIT",
+  "keywords": ["claude-code-mod", "session", "transcript", "terminal"]
+}
