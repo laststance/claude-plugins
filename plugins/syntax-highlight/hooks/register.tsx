@@ -64,6 +64,23 @@ const OUTPUT_WAIT_MS = 1500
 // Claude Code's own fold of a collapsed result: rows shown, and the columns its indent takes from the width
 const FOLD_ROWS = 3
 const FOLD_INDENT = 10
+// What a grouped row draws around a command line's runs (the dot, `Bash`, the bracket, each a Text and its text), and
+// the columns that prefix takes from the line
+const COMMAND_LINE_NODES = 8
+const COMMAND_INDENT = 7
+// What the rest of a grouped row takes in its tree beside its command and output rows: its boxes, the ⎿ and both fold
+// hints, as nodes and as characters
+const ROW_FRAME_NODES = 12
+const ROW_FRAME_CHARACTERS = 120
+// A redraw asked for a grouped row (its group folded or unfolded, or was learned after the row was drawn) waits this
+// long, so the group events of one drawing pass ask for one redraw between them
+const REGROUP_REDRAW_DELAY_MS = 50
+// A call asks for at most this many such redraws in one burst: two views of one call that each undid the other's record
+// would otherwise redraw without end
+const MAX_REGROUP_REDRAWS = 20
+// A burst ends once no such redraw has been asked for this long, and every call may ask again: a person folding and
+// unfolding a group does so seconds apart, a loop of redraws milliseconds apart
+const REGROUP_QUIET_MS = 2000
 
 // the colours of commands and snippets, by their text
 const cache = new Map<string, Colours>()
@@ -96,6 +113,22 @@ const commands = new Map<string, string>()
 const payloads = new Map<string, { head: string; payload: OutputPayload | null }>()
 // calls whose Output block was drawn before their command was known (a resumed session draws results first)
 const waitingForCommand = new Map<string, true>()
+// Bash calls drawn as rows of a group on the terminal's main screen, by call: true when Claude Code drew the group
+// collapsed and this mod unfolded it (the row folds its command and output), false when Claude Code expanded it
+// (ctrl+o, verbose). A grouped row draws its result itself; no ToolResult is drawn for it
+const grouped = new Map<string, boolean>()
+// expanded Bash rows with a result that were answered before any group named them: a group that names one later asks
+// for a redraw, so the row gains its output (verbose mode draws a resumed group's rows before the group)
+const drawnBare = new Map<string, true>()
+// how many redraws each call has asked for as a grouped row in the current burst, against MAX_REGROUP_REDRAWS
+const regroupRedraws = new Map<string, number>()
+// every such request made, counted or refused: each one waits REGROUP_QUIET_MS and, when none came after it, ends the burst
+let regroupAsks = 0
+// whether a redraw for grouped rows is already waiting out its delay
+let isRegroupRedrawAsked = false
+// grouped rows first drawn before their colours were back and too tall for the main screen to redraw, by call and
+// fold state: such a row keeps its plain styling in that state (its text is still read from each drawing's record)
+const keptPlain = new Map<string, true>()
 let options: Options = { editor: 'auto', theme: '', strength: 0.55, codeStrength: 1, outputStrength: 0.75, collapsedLines: 3 }
 
 /**
@@ -424,6 +457,12 @@ const isTooTallToRedraw = (drawn: Colourable, isExpanded: boolean, viewport: { c
  */
 const foldRows = (lines: Run[][], width: number) => {
   const rows: Run[][] = []
+  let total = 0
+  // a finished row is kept while it may be shown (the first FOLD_ROWS, and a fourth); the rest are only counted
+  const endRow = (row: Run[]) => {
+    total++
+    if (rows.length <= FOLD_ROWS) rows.push(row)
+  }
   for (const runs of lines) {
     let row: Run[] = []
     let used = 0
@@ -434,7 +473,7 @@ const foldRows = (lines: Run[][], width: number) => {
         const cells = cellsOf(ch)
         if (used + cells > width && used > 0) {
           if (part !== '') row.push({ ...run, t: part })
-          rows.push(row)
+          endRow(row)
           row = []
           used = 0
           part = ''
@@ -444,11 +483,48 @@ const foldRows = (lines: Run[][], width: number) => {
       }
       if (part !== '') row.push({ ...run, t: part })
     }
-    rows.push(row)
+    endRow(row)
   }
-  const hidden = rows.length - FOLD_ROWS
+  const hidden = total - FOLD_ROWS
   if (hidden === 1) return { rows, hidden: 0 }
   return { rows: rows.slice(0, FOLD_ROWS), hidden: Math.max(0, hidden) }
+}
+
+/**
+ * Lines of text as uncoloured rows, one run each (an empty line, no run), as {@link renderRuns} takes them.
+ *
+ * Called for the part of an Output block past the colouring cap, and by {@link groupedRow} for a command or an output
+ * whose colours are not back.
+ *
+ * @param lines - The lines of text.
+ * @returns one row of runs per line
+ * @example
+ * plainRows(['a', '']) // => [[{ t: 'a', fg: null, b: false, i: false, u: false }], []]
+ */
+const plainRows = (lines: string[]): Run[][] => lines.map(line => (line === '' ? [] : [{ t: line, fg: null, b: false, i: false, u: false }]))
+
+/**
+ * How many terminal rows lines of text take once wrapped, counted up to a limit.
+ *
+ * Called by {@link groupedRow} to tell whether its whole row passes the main screen's height.
+ *
+ * @param lines - The lines of text.
+ * @param width - The cells a row holds.
+ * @param limit - Counting stops once the rows pass this many.
+ * @returns the rows the lines take, or a number past `limit` once they pass it
+ * @example
+ * wrappedRows(['abcdef', ''], 4, 100) // => 3
+ */
+const wrappedRows = (lines: string[], width: number, limit: number) => {
+  let rows = 0
+  // each line takes at least one row, and one more for every `width` cells past the first (two cells for a wide character)
+  for (const line of lines) {
+    let cells = 0
+    for (const ch of line) cells += cellsOf(ch)
+    rows += Math.max(1, Math.ceil(cells / width))
+    if (rows > limit) break
+  }
+  return rows
 }
 
 /**
@@ -515,6 +591,204 @@ const renderRuns = (Text: any, runs: Run[], strength: number, scope: string, dim
         ),
       )
 
+/**
+ * Draws an Output block as Claude Code draws a result: behind `⎿`, one Text per row, and the fold's hint when rows
+ * were left out.
+ *
+ * Called by the `ToolResult` hook for a standalone row's block and by {@link groupedRow} for a grouped row's, once the
+ * caller has checked the rows against the tree's bounds.
+ *
+ * @param Box - The surface's Box element.
+ * @param Text - The surface's Text element.
+ * @param rows - The rows to draw, folded or not.
+ * @param hidden - How many rows the fold left out; 0 draws no hint.
+ * @param scope - The hover scope of the block's rows.
+ * @returns the block's tree
+ */
+const drawOutput = (Box: any, Text: any, rows: Run[][], hidden: number, scope: string) => (
+  <Box flexDirection="row">
+    <Text dimColor>{'  ⎿  '}</Text>
+    <Box flexDirection="column">
+      {rows.map(runs => (
+        <Text wrap="wrap" hover={{ scope }}>{renderRuns(Text, runs, options.outputStrength, scope, false)}</Text>
+      ))}
+      {hidden > 0 ? <Text dimColor>{`… +${hidden} line${hidden === 1 ? '' : 's'} (ctrl+o to expand)`}</Text> : null}
+    </Box>
+  </Box>
+)
+
+/**
+ * Draws a Bash command's lines as Claude Code draws a tool row: `⏺ Bash(` before the first, an indent before the
+ * rest, the closing bracket after the last, and the fold's hint when lines were left out.
+ *
+ * Called by the `ToolUse` hook for a standalone row and by {@link groupedRow} for a grouped one.
+ *
+ * @param Text - The surface's Text element.
+ * @param shown - The command's lines to draw.
+ * @param hidden - How many lines the fold left out; 0 draws no hint.
+ * @param dot - The colour of the row's dot: `success`, `error` or `inactive` (still running).
+ * @param scope - The hover scope of the row's lines.
+ * @returns the row's elements, to be put in a column
+ */
+const drawCommand = (Text: any, shown: Run[][], hidden: number, dot: string, scope: string) => [
+  ...shown.map((runs, n) => (
+    <Text wrap="wrap" hover={{ scope }}>
+      {n === 0 ? <Text color={dot}>⏺ </Text> : <Text>{'  '}</Text>}
+      {n === 0 ? <Text weight="bold">Bash</Text> : <Text>{'    '}</Text>}
+      <Text dimColor>{n === 0 ? '(' : ' '}</Text>
+      {renderRuns(Text, runs, options.strength, scope)}
+      {n === shown.length - 1 && hidden === 0 ? <Text dimColor>)</Text> : null}
+    </Text>
+  )),
+  hidden > 0 ? <Text dimColor>{`      … +${hidden} line${hidden === 1 ? '' : 's'}) (ctrl+o to expand)`}</Text> : null,
+]
+
+/** What of a render event tells where it is drawn; the terminal always says whether it is fullscreen. */
+type DrawnOn = { surface: string; viewport?: { columns: number; rows: number; isFullscreen?: boolean } }
+
+/**
+ * Whether a render event is drawn on the terminal's main screen, the one place grouped rows draw their output.
+ *
+ * In fullscreen the ctrl+o transcript draws a group's calls as standalone rows, each with its own `ToolResult`, and
+ * nothing in a `ToolUse` event tells that view from the main one, where the same calls are grouped rows: a row that
+ * drew its output there would show it twice. Other surfaces are not known to raise groups the same way. Called by the
+ * `ToolGroup`, `ToolResult` and `ToolUse` hooks.
+ *
+ * @param e - The render event.
+ * @returns true on the terminal when it is not fullscreen
+ */
+const isMainScreen = (e: DrawnOn) => e.surface === 'terminal' && e.viewport?.isFullscreen === false
+
+/**
+ * Asks for one redraw of the drawn rows on behalf of grouped calls whose record changed, after a short delay that
+ * gathers the requests of one drawing pass.
+ *
+ * Called by the `ToolGroup` hook (a group folded or unfolded, or named a row already drawn without its output) and by
+ * the `ToolResult` hook (a call drawn standalone after all). Each call may ask {@link MAX_REGROUP_REDRAWS} times in a
+ * burst; past that its record still changes and its row keeps its last drawing until another redraw reaches it. A
+ * burst ends once {@link REGROUP_QUIET_MS} pass with no request, so ctrl+o pressed seconds apart is never refused,
+ * while requests that keep coming (two views undoing each other's record) stop at the bound.
+ *
+ * @param $ - The engine interface, for the delay and the redraw.
+ * @param ids - The calls whose rows need the redraw.
+ * @example
+ * askRegroupRedraw($, ['toolu_01AbC']) // one `$.ui.invalidate('ui.render')` some 50 ms later
+ */
+const askRegroupRedraw = ($: EngineInterface, ids: string[]) => {
+  const ask = ++regroupAsks
+  // each request waits out the quiet time on its own; the last one of a burst finds no later request and lets every
+  // call ask again
+  void (async () => {
+    try {
+      await $.clock.sleep(REGROUP_QUIET_MS)
+      if (regroupAsks === ask) regroupRedraws.clear()
+    } catch {
+      // a wait that fails leaves the counts as they are; a later request ends the burst
+    }
+  })()
+  let isAllowed = false
+  // count the request against each call; one call still under its bound is enough to ask
+  for (const id of ids) {
+    const asked = regroupRedraws.get(id) ?? 0
+    if (asked >= MAX_REGROUP_REDRAWS) continue
+    remember(regroupRedraws, id, asked + 1, MAX_CALLS)
+    isAllowed = true
+  }
+  if (!isAllowed || isRegroupRedrawAsked) return
+  isRegroupRedrawAsked = true
+  void (async () => {
+    try {
+      await $.clock.sleep(REGROUP_REDRAW_DELAY_MS)
+    } catch {
+      // a delay that fails still ends in the redraw
+    } finally {
+      isRegroupRedrawAsked = false
+    }
+    $.ui.invalidate('ui.render')
+  })()
+}
+
+/** The part of a `ToolUse` render event {@link groupedRow} reads. */
+type GroupedRowEvent = DrawnOn & { props: { isRunning: boolean; isErrored: boolean; isInterrupted: boolean; output?: unknown } }
+
+/**
+ * Draws a Bash call that is a row of a group: its command and, once it has one, its result under it.
+ *
+ * A group's rows draw their result inline; Claude Code raises no `ToolResult` for them, so a row holding only the
+ * command would show no output. The row is drawn in Claude Code's layout: folded like a collapsed standalone row
+ * (the command to `collapsedLines`, the output to three rows) when this mod unfolded the group, in full when Claude
+ * Code expanded it. A part whose colours are not back is drawn plain, with the rows it will have once coloured.
+ * Called by the `ToolUse` hook for a call the `ToolGroup` hook recorded, on the terminal's main screen only.
+ *
+ * @param $ - The engine interface, to start colouring what has no colours yet.
+ * @param e - The row's render event.
+ * @param elements - The surface's Box and Text elements.
+ * @param id - The call's `tool_use_id`.
+ * @param command - The call's command, its trailing blank space cut.
+ * @param isFolded - Whether the group was collapsed when Claude Code asked for it (see `grouped`).
+ * @returns the row's tree, or null when Claude Code should draw the whole row: an error, an interrupt, a result
+ *   {@link colourableResult} hands back or one with sibling rows (only Claude Code can draw them, and only with the row),
+ *   an empty command, or a row past the bounds of one tree
+ */
+const groupedRow = ($: EngineInterface, e: GroupedRowEvent, elements: { Box: any; Text: any }, id: string, command: string, isFolded: boolean) => {
+  if (e.props.isErrored || e.props.isInterrupted || command.trim() === '' || e.viewport === undefined) return null
+  const hasOutput = e.props.output !== undefined
+  const result = hasOutput ? colourableResult(e.props.output) : null
+  if (hasOutput && (result === null || result.hasSiblings)) return null
+  const { head, rest } = result === null ? { head: '', rest: [] } : capOutput(result.stdout)
+  // not even the first line fits the colouring cap: Claude Code draws the row
+  if (result !== null && head === '') return null
+
+  // a command pushed out of the cache after its row was coloured is not coloured again (see colouredRows)
+  const commandColours = coloursOf({ command }) ?? (colouredRows.has(id) ? 'plain' : undefined)
+  if (commandColours === undefined) void highlight($, { command })
+  const payload = result === null ? null : outputPayload(id, head)
+  const outputColours = payload === null ? 'plain' : coloursOf(payload)
+  if (payload !== null && outputColours === undefined) void highlight($, payload)
+
+  const commandText = command.split('\n')
+  const outputText = result === null ? [] : [...head.split('\n'), ...rest]
+  const commandWidth = Math.max(e.viewport.columns - COMMAND_INDENT, 10)
+  const outputWidth = Math.max(e.viewport.columns - FOLD_INDENT, 10)
+  // a row whose colours are still to come is drawn again once they are back: one too tall for the main screen to redraw
+  // whole keeps its plain styling in this fold state, so no scrolled-off rows of this drawing are left above a new one
+  const kept = `${id}:${isFolded ? 'folded' : 'full'}`
+  const isStillColouring = [commandColours, outputColours].some(colours => colours === undefined || colours === 'pending')
+  if (isStillColouring && !keptPlain.has(kept)) {
+    const shownCommand = isFolded ? commandText.slice(0, options.collapsedLines) : commandText
+    // the blank line above the row and both fold hints are counted, as the prompt below is
+    let rows = PROMPT_ROWS + 3 + wrappedRows(shownCommand, commandWidth, e.viewport.rows)
+    // folded, the output takes its wrapped rows up to the fold's four (three and the hint, or all four)
+    if (rows <= e.viewport.rows) rows += isFolded ? Math.min(FOLD_ROWS + 1, wrappedRows(outputText, outputWidth, FOLD_ROWS)) : wrappedRows(outputText, outputWidth, e.viewport.rows)
+    if (rows > e.viewport.rows) remember(keptPlain, kept, true, MAX_CALLS)
+  }
+  const isKeptPlain = keptPlain.has(kept)
+
+  const isCommandColoured = typeof commandColours === 'object' && !isKeptPlain
+  const commandLines = isCommandColoured ? commandColours.lines : plainRows(commandText)
+  // a command whose colours were made is noted even when the row is kept plain: once they are pushed out of the cache,
+  // the row is not sent to a worker again, which would push out another row's and so on without end
+  if (typeof commandColours === 'object') remember(colouredRows, id, true, MAX_CALLS)
+  const shown = isFolded ? commandLines.slice(0, options.collapsedLines) : commandLines
+  const hiddenLines = commandLines.length - shown.length
+  const outputLines = typeof outputColours === 'object' && !isKeptPlain ? [...outputColours.lines, ...plainRows(rest)] : plainRows(outputText)
+  const { rows, hidden } = isFolded ? foldRows(outputLines, outputWidth) : { rows: outputLines, hidden: 0 }
+  // everything the row draws is counted, the command's own prefixes too: past the engine's bounds the tree is refused
+  // or its end, the output, cut with no mark, where Claude Code draws the row whole
+  const nodes = drawnNodes(shown) + COMMAND_LINE_NODES * shown.length + drawnNodes(rows) + ROW_FRAME_NODES
+  const characters = drawnCharacters(shown) + COMMAND_INDENT * shown.length + drawnCharacters(rows) + ROW_FRAME_CHARACTERS
+  if (nodes > MAX_DRAWN_NODES || characters > MAX_DRAWN_CHARACTERS) return null
+
+  const { Box, Text } = elements
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {drawCommand(Text, shown, hiddenLines, e.props.isRunning ? 'inactive' : 'success', scopeOf('', id))}
+      {result === null ? null : drawOutput(Box, Text, rows, hidden, scopeOf('out:', id))}
+    </Box>
+  )
+}
+
 export const register: Register = (on, userOptions) => {
   options = { ...options, ...(userOptions as Partial<Options>) }
 
@@ -566,8 +840,23 @@ export const register: Register = (on, userOptions) => {
   }).catch(($, e, next) => next(e))
 
   // a group of calls draws one collapsed line ("Running ..."), where Bash commands would stay unhighlighted: unfold it
-  // into its own ToolUse rows (drawn below) whenever it holds a Bash call
+  // into its own ToolUse rows (drawn below) whenever it holds a Bash call. Its Bash calls are recorded first, with
+  // whether Claude Code drew the group collapsed, so each row draws its own result, folded or not (see groupedRow)
   on('ui.render', { component: 'ToolGroup' }, async ($, e, next) => {
+    if (isMainScreen(e)) {
+      const isFolded = !e.props.isExpanded
+      const redrawn: string[] = []
+      for (const call of e.props.calls) {
+        const id = call.tool_use_id
+        if (call.tool !== 'Bash' || typeof id !== 'string') continue
+        const before = grouped.get(id)
+        if (before === isFolded) continue
+        remember(grouped, id, isFolded, MAX_CALLS)
+        // a row drawn for the other fold state, or drawn without its output before this group named it, is drawn again
+        if (drawnBare.delete(id) || before !== undefined) redrawn.push(id)
+      }
+      if (redrawn.length > 0) askRegroupRedraw($, redrawn)
+    }
     if (e.props.isExpanded || !e.props.calls.some(call => call.tool === 'Bash')) return next(e)
     return next({ ...e, props: { ...e.props, isExpanded: true } })
   }).catch(($, e, next) => next(e))
@@ -575,10 +864,14 @@ export const register: Register = (on, userOptions) => {
   // a Bash call's Output block, drawn as Claude Code draws it (the ⎿ indent, the fold) with its text coloured, and
   // Claude Code's own sibling rows (the cwd notice, stderr, an edit diff, images) drawn by Claude Code beneath it
   on('ui.render', { component: 'ToolResult' }, async ($, e, next) => {
-    if (e.props.tool !== 'Bash' || e.props.isErrored) return next(e)
+    if (e.props.tool !== 'Bash') return next(e)
+    const id = e.props.tool_use_id
+    // a result drawn on its own belongs to a standalone row: a call recorded as a grouped row is one no longer, and its
+    // row is drawn again without the output this block now shows
+    if (isMainScreen(e) && grouped.delete(id)) askRegroupRedraw($, [id])
+    if (e.props.isErrored) return next(e)
     const result = colourableResult(e.props.output)
     if (result === null) return next(e)
-    const id = e.props.tool_use_id
     const isExpanded = e.props.isExpanded === true
     // Claude Code draws the block until its colours are back; an expanded one too tall, with its sibling rows, for the
     // main screen to redraw whole stays as Claude Code drew it, so no scrolled-off rows of this drawing are left
@@ -604,24 +897,13 @@ export const register: Register = (on, userOptions) => {
 
     const { Box, Text } = $.ui.resolve(e)
     const scope = scopeOf('out:', String(e.props.tool_use_id))
-    const plain: Run[][] = rest.map(line => (line === '' ? [] : [{ t: line, fg: null, b: false, i: false, u: false }]))
-    const lines = [...done.lines, ...plain]
+    const lines = [...done.lines, ...plainRows(rest)]
     // collapsed, the block folds as Claude Code folds it; expanded (ctrl+o, verbose), every line is drawn
     const width = Math.max((e.viewport?.columns ?? 80) - FOLD_INDENT, 10)
     const { rows, hidden } = isExpanded ? { rows: lines, hidden: 0 } : foldRows(lines, width)
     // a tree past the engine's bound on nodes is refused, and one past its characters is cut: Claude Code draws the block
     if (drawnNodes(rows) > MAX_DRAWN_NODES || drawnCharacters(rows) > MAX_DRAWN_CHARACTERS) return next(e)
-    const block = (
-      <Box flexDirection="row">
-        <Text dimColor>{'  ⎿  '}</Text>
-        <Box flexDirection="column">
-          {rows.map(runs => (
-            <Text wrap="wrap" hover={{ scope }}>{renderRuns(Text, runs, options.outputStrength, scope, false)}</Text>
-          ))}
-          {hidden > 0 ? <Text dimColor>{`… +${hidden} line${hidden === 1 ? '' : 's'} (ctrl+o to expand)`}</Text> : null}
-        </Box>
-      </Box>
-    )
+    const block = drawOutput(Box, Text, rows, hidden, scope)
     // the sibling rows stay Claude Code's: it draws them for this result with the stdout taken out, and draws nothing
     // for a result with none ("(No output)"), so it is asked only when there are some. It is asked last, once the rest
     // is drawn, since a hook that fails after asking leaves that answer, stdout taken out, standing. The exit code's
@@ -648,6 +930,11 @@ export const register: Register = (on, userOptions) => {
       remember(commands, id, input.command.trimEnd(), MAX_CALLS)
       // its Output block was drawn before the command was known: draw it again, once, planned from the command
       if (waitingForCommand.delete(id)) $.ui.invalidate('ui.render')
+      const isFolded = isMainScreen(e) ? grouped.get(id) : undefined
+      // a row of a group draws its own result, which no ToolResult will; a row it cannot draw whole is Claude Code's
+      if (isFolded !== undefined) return groupedRow($, e, $.ui.resolve(e), id, input.command.trimEnd(), isFolded) ?? next(e)
+      // an expanded row with a result that no group has named yet: a group naming it later draws it again (see drawnBare)
+      if (isMainScreen(e) && e.props.isExpanded === true && e.props.output !== undefined) remember(drawnBare, id, true, MAX_CALLS)
     }
 
     const payload: Exclude<Payload, OutputPayload> | null = isShow
@@ -691,17 +978,8 @@ export const register: Register = (on, userOptions) => {
 
     return (
       <Box flexDirection="column" marginTop={1}>
-        {shown.map((runs, n) => (
-          <Text wrap="wrap" hover={{ scope }}>
-            {n === 0 ? <Text color={dot}>⏺ </Text> : <Text>{'  '}</Text>}
-            {n === 0 ? <Text weight="bold">Bash</Text> : <Text>{'    '}</Text>}
-            <Text dimColor>{n === 0 ? '(' : ' '}</Text>
-            {renderRuns(Text, runs, options.strength, scope)}
-            {n === shown.length - 1 && hidden === 0 ? <Text dimColor>)</Text> : null}
-          </Text>
-        ))}
-        {hidden > 0 ? <Text dimColor>{`      … +${hidden} line${hidden === 1 ? '' : 's'}) (ctrl+o to expand)`}</Text> : null}
+        {drawCommand(Text, shown, hidden, dot, scope)}
       </Box>
     )
-  })
+  }).catch(($, e, next) => next(e))
 }

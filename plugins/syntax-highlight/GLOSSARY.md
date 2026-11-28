@@ -12,6 +12,10 @@ _Avoid_: tool row, command line, ToolUse
 The text shown under a Command row (after `⎿`): what the command printed.
 _Avoid_: tool result, output, ToolResult
 
+**Grouped row**:
+A Command row of a call that Claude Code folded, with the calls around it, into one count line (a run of reads and searches). This mod unfolds the line into its rows; a Grouped row holds its own Output block, where a standalone row's is drawn separately under it.
+_Avoid_: group row, inline row, collapsed call
+
 ## What gets coloured
 
 **Language**:
