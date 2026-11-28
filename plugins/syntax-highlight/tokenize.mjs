@@ -8,7 +8,7 @@ import path from 'node:path'
 import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
-import { detectEditor, findGrammars, norm, readJsonc, readText, resolveTheme } from './editors.mjs'
+import { BUNDLED, detectEditor, findGrammars, norm, readJsonc, readText, resolveTheme } from './editors.mjs'
 import { BLOCK, assignLines, planOutput, readsApart, shapeGrammars } from './outputs.mjs'
 import { ASSIGN, WRAPPERS, base, lex } from './shell.mjs'
 
@@ -23,12 +23,16 @@ const HERE = path.dirname(fileURLToPath(import.meta.url))
 const input = JSON.parse(fs.readFileSync(0, 'utf8'))
 const config = readJsonc(path.join(HERE, 'config.json')) ?? {}
 
-const editor = detectEditor(input.editor ?? config.editor)
-const resolved = resolveTheme(editor.id, input.theme ?? config.theme)
+const wantedEditor = input.editor ?? config.editor
+const editor = detectEditor(wantedEditor)
+// `editor: bundled` reads no installed editor. When no editor is found the id is the same, but extension folders left
+// on the machine are still read
+const readsInstalled = wantedEditor !== BUNDLED
+const resolved = resolveTheme(editor.id, input.theme ?? config.theme, readsInstalled)
 const theme = resolved.theme
 const wanted = resolved.name
 const defaultFg = (theme.colors['editor.foreground'] ?? '#D4D4D4').toLowerCase()
-const grammarIndex = findGrammars(editor.id)
+const grammarIndex = findGrammars(editor.id, readsInstalled)
 const grammarFiles = grammarIndex.files
 
 // ---------- TextMate registry ----------

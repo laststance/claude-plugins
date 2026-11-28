@@ -88,7 +88,9 @@ test('a Markdown read after a cd outside the project is coloured top to bottom, 
   const texts = (await block.findAll({ type: 'Text' })).map(t => t.text)
   expect(texts.some(text => text.includes('name: deploy-lock'))).toBe(true)
   expect(texts.filter(text => text === CLAUDE_CODE_DRAWS)).toHaveLength(1)
-  expect(texts.indexOf(CLAUDE_CODE_DRAWS)).toBeGreaterThan(texts.findIndex(text => text.includes('**Why:**')))
+  const lastMarkdownRow = texts.findIndex(text => text.includes('**Why:**'))
+  expect(lastMarkdownRow).toBeGreaterThan(-1)
+  expect(texts.indexOf(CLAUDE_CODE_DRAWS)).toBeGreaterThan(lastMarkdownRow)
   expect(seen.drawnByClaudeCode.at(-1)).toEqual({ stdout: '', stderr: CWD_NOTICE, interrupted: false, isImage: false })
   await block.unmount()
   await row.unmount()
@@ -495,9 +497,10 @@ test('a Bash call that fails is returned as it is, with no Output block coloured
   on('tool.call', () => ({ result: { stdout: MEMORY_STDOUT, stderr: '', interrupted: false, isImage: false }, isError: true }) as never)
 
   // Act
-  await $.tool.call({ tool: 'Bash', command: MEMORY_COMMAND, tool_use_id: 'call-40' } as never)
+  const done = await $.tool.call({ tool: 'Bash', command: MEMORY_COMMAND, tool_use_id: 'call-40' } as never)
 
-  // Assert: the command is coloured on its way in, the error's text never is
+  // Assert: the failure comes back as Claude Code gave it; the command is coloured on its way in, the error's text never is
+  expect(done).toEqual({ result: { stdout: MEMORY_STDOUT, stderr: '', interrupted: false, isImage: false }, isError: true })
   expect(seen.workerInputs.filter(asked => typeof asked.output === 'string')).toHaveLength(0)
   expect(seen.workerInputs.filter(asked => asked.command === MEMORY_COMMAND)).toHaveLength(1)
 })
@@ -812,13 +815,19 @@ test('more distinct command rows than the colour cache holds, drawn again while 
 })
 
 test('an Output block drawn in two versions sends each to a worker once while 200 other blocks are coloured', { timeoutMs: 120_000 }, async ($, on) => {
-  // Arrange: the two versions' workers are held; every other block is answered at once, and the test is told when the
-  // 200 other blocks have been
+  // Arrange: the two versions' workers are held and every other colouring is answered at once. The mod asks for a
+  // redraw once for each colouring it has kept, so counting those tells the test how many are done
   const started: string[] = []
   const held: Array<() => void> = []
-  let otherBlocksDone: () => void = () => {}
-  const everyOtherBlockDone = new Promise<void>(resolve => (otherBlocksDone = resolve))
-  let otherBlocks = 0
+  let kept = 0
+  let wanted = Infinity
+  let onKept: () => void = () => {}
+  const colouringsKept = (count: number) =>
+    new Promise<void>(resolve => {
+      wanted = count
+      onKept = resolve
+      if (kept >= wanted) resolve()
+    })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -829,10 +838,15 @@ test('an Output block drawn in two versions sends each to a worker once while 20
     const text = String(asked.output ?? asked.command ?? '')
     started.push(text)
     if (text.startsWith('# Version')) await new Promise<void>(resolve => held.push(resolve))
-    if (text.startsWith('# Other') && ++otherBlocks === 200) otherBlocksDone()
     const lines = text.split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
 
     return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.invalidate', (_, e, next) => {
+    kept++
+    if (kept >= wanted) onKept()
+
+    return next(e)
   })
   on('clock.sleep', () => ({ value: undefined }))
   const handles: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void> }> = []
@@ -843,11 +857,13 @@ test('an Output block drawn in two versions sends each to a worker once while 20
     handles.push(await $.ui.mount(commandRow(`call-other-${n}`, `cat other-${n}.md`)))
     handles.push(await $.ui.mount(outputBlock(`call-other-${n}`, { stdout: `# Other ${n}\n`, stderr: '', interrupted: false, isImage: false })))
   }
-  await everyOtherBlockDone
+  // this call's command and the 200 other calls (a command and a block each) make 401 colourings kept
+  await colouringsKept(401)
 
-  // Act: the first version's worker finishes, and the second version, still waiting, is drawn again
+  // Act: the first version's worker finishes and the mod keeps its colours; the second version, still waiting, is
+  // drawn again
   held.shift()?.()
-  await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
+  await colouringsKept(402)
   await second.redraw()
 
   // Assert: the second version went to a worker once

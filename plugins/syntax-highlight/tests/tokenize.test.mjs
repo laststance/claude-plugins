@@ -14,19 +14,22 @@ const HOME_FOR_WORKER = fs.mkdtempSync(path.join(os.tmpdir(), 'syntax-highlight-
 after(() => fs.rmSync(HOME_FOR_WORKER, { recursive: true, force: true }))
 
 /**
- * Colours an Output block with the real worker, its grammars and the bundled Dark+ theme.
+ * Colours an Output block with the real worker, the bundled grammars and the bundled Dark+ theme.
  *
  * @param output - The block's text.
  * @param command - The command that printed it.
+ * @param worker - The worker's `editor` option and its home folder. By default `bundled`, which reads no editor
+ *   installed on this machine, in an empty home, so the colours expected in this file are the same on every machine.
  * @returns the worker's lines: per line, its runs `{ t, fg, b, i, u }`
  * @example
  * colourOutput('# Title', 'cat a.md')[0][0] // => { t: '# Title', fg: '#569cd6', b: true, ... }
  */
-const colourOutput = (output, command) => {
-  // a home of its own, so the worker neither reads this machine's user grammars nor writes its runners file there
-  const env = { ...process.env, HOME: HOME_FOR_WORKER, SYNTAX_HIGHLIGHT_RUNNERS: path.join(path.dirname(WORKER), 'runners.json') }
+const colourOutput = (output, command, { editor = 'bundled', home = HOME_FOR_WORKER } = {}) => {
+  // a home of its own (HOME, and USERPROFILE on Windows), so the worker neither reads this machine's settings nor
+  // writes its runners file there
+  const env = { ...process.env, HOME: home, USERPROFILE: home, SYNTAX_HIGHLIGHT_RUNNERS: path.join(path.dirname(WORKER), 'runners.json') }
   // the Node that runs this suite, which need not be the `node` on the PATH
-  const done = spawnSync(process.execPath, [WORKER], { input: JSON.stringify({ output, command, theme: 'dark-plus' }), encoding: 'utf8', timeout: 20000, env })
+  const done = spawnSync(process.execPath, [WORKER], { input: JSON.stringify({ output, command, editor, theme: 'dark-plus' }), encoding: 'utf8', timeout: 20000, env })
   assert.equal(done.status, 0, done.stderr)
   return JSON.parse(done.stdout).lines
 }
@@ -116,4 +119,29 @@ test('a Markdown file counted by GNU wc under a name with a space opens with its
   // Assert: the count takes wc's colour, and the frontmatter key and value theirs
   assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['7', '#b5cea8'], [' release notes.md', null]])
   assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['title', '#569cd6'], [': ', null], ['Release', '#ce9178']])
+})
+
+test('with the editor option at bundled, a Markdown grammar installed for VS Code is not read, while any other choice reads it', t => {
+  // Arrange: a home holding a VS Code extension whose Markdown grammar colours every line as a comment
+  const home = fs.mkdtempSync(path.join(os.tmpdir(), 'syntax-highlight-test-vscode-'))
+  t.after(() => fs.rmSync(home, { recursive: true, force: true }))
+  const extension = path.join(home, '.vscode', 'extensions', 'test.markdown-as-comment-1.0.0')
+  fs.mkdirSync(extension, { recursive: true })
+  const manifest = {
+    name: 'markdown-as-comment',
+    contributes: {
+      languages: [{ id: 'markdown', extensions: ['.md'] }],
+      grammars: [{ language: 'markdown', scopeName: 'text.html.markdown', path: './markdown.json' }],
+    },
+  }
+  fs.writeFileSync(path.join(extension, 'package.json'), JSON.stringify(manifest))
+  fs.writeFileSync(path.join(extension, 'markdown.json'), JSON.stringify({ scopeName: 'text.html.markdown', patterns: [{ match: '.+', name: 'comment.line.test' }] }))
+
+  // Act: Vim has no TextMate grammars of its own, so that choice reads the ones installed for VS Code
+  const bundled = colourOutput('# Title', 'cat a.md', { editor: 'bundled', home })
+  const vim = colourOutput('# Title', 'cat a.md', { editor: 'vim', home })
+
+  // Assert: the bundled grammar draws a heading, the installed one a comment
+  assert.deepEqual(bundled, [[{ t: '# Title', fg: '#569cd6', b: true, i: false, u: false }]])
+  assert.deepEqual(vim, [[{ t: '# Title', fg: '#6a9955', b: false, i: false, u: false }]])
 })

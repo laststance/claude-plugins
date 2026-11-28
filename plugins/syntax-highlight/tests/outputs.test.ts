@@ -456,6 +456,34 @@ test('a Markdown line that opens with the grep pattern (release notes:12:) stays
   expect(scopes).toEqual([BLOCK, BLOCK])
 })
 
+test('a Markdown line that opens with the grep pattern stays Markdown when a flag before the pattern takes a value of its own (rg --color never)', () => {
+  // Arrange: the flag takes the word after it, so the next word (two words in quotes) is the pattern, not a file
+  const commands = [
+    'rg --color never "release notes" src/app.ts; cat guide.md',
+    'rg --color=never "release notes" src/app.ts; cat guide.md',
+    'rg --colors match:fg:red "release notes" src/app.ts; cat guide.md',
+    'rg -G "*.lock" --glob-not vendor "release notes" src/app.ts; cat guide.md',
+    'rg --maxdepth 2 --max-filesize 1M --max-bytes 4096 "release notes" src/app.ts; cat guide.md',
+    'rg --engine pcre2 --dfa-size-limit 1G --regex-size-limit 1G "release notes" src/app.ts; cat guide.md',
+    'rg --context-separator .. --field-context-separator - --field-match-separator : --path-separator / "release notes" src/app.ts; cat guide.md',
+    'rg --ignore-file .rgignore --type-add web:*.html --type-clear web --in paths.txt --in0 paths0.txt "release notes" src/app.ts; cat guide.md',
+    'rg --hostname-bin hostname --hyperlink-format default "release notes" src/app.ts; cat guide.md',
+    'grep -n --exclude-from ignored.txt --include-dir src --group-separator .. "release notes" src/app.ts; cat guide.md',
+    'git grep -n --parent-basename site "release notes" src/app.ts; cat guide.md',
+    'ag --nogroup -W 80 --width 80 --workers 2 "release notes" src/app.ts; cat guide.md',
+    'ag --nogroup --color-line-number "1;33" --color-match "30;43" --color-path "1;32" --ackmate-dir-filter src "release notes" src/app.ts; cat guide.md',
+  ]
+  const lines = ['release notes:12: deploy', '# Guide']
+
+  for (const command of commands) {
+    // Act
+    const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+    // Assert
+    expect({ command, scopes }).toEqual({ command, scopes: [BLOCK, BLOCK] })
+  }
+})
+
 test('a GNU wc count of a file named after -- (a name that opens with -) keeps its colours, and the file after it opens with its frontmatter', () => {
   // Arrange
   const command = "wc -l -- '-release notes.md'; cat -- '-release notes.md'"

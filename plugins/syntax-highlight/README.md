@@ -59,14 +59,14 @@ In Claude Code: `/config`, then the `syntax-highlight` rows.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `editor` | `auto` | whose theme and grammars to use (VS Code, Cursor, Windsurf, VSCodium, Zed, Sublime Text, JetBrains, Neovim, Helix, Vim) |
+| `editor` | `auto` | whose theme and grammars to use (VS Code, Cursor, Windsurf, VSCodium, Zed, Sublime Text, JetBrains, Neovim, Helix, Vim), or `bundled` |
 | `theme` | empty | theme name override (e.g. `One Dark Pro`) |
 | `strength` | `0.55` | colour strength of Bash commands (0 grey, 1 full) |
 | `outputStrength` | `0.75` | same for what a command prints; uncoloured text stays as it is |
 | `codeStrength` | `1` | same for `show_code` output |
 | `collapsedLines` | `3` | lines of a long command shown before "ctrl+o to expand" |
 
-`editor: auto` picks the IDE Claude Code is connected to, else `$VISUAL`/`$EDITOR`, else the first editor found.
+`editor: auto` picks the IDE Claude Code is connected to, else `$VISUAL`/`$EDITOR`, else the first editor found. `editor: bundled` reads no editor on this machine: it draws with the grammars and themes that ship with the mod (Dark+, or the bundled theme `theme` names), so the colours are the same on every machine.
 
 ## Runners (code inside commands)
 

@@ -400,18 +400,34 @@ const operandsOf = args => {
   return [...before.filter(arg => !arg.startsWith('-')), ...(end === -1 ? [] : args.slice(end + 1))]
 }
 
-// flags that take a value, by program, and those of them that give the pattern (ag has none: its -f follows links)
+// flags that take a value, by program, and those of them that give the pattern (ag has none: its -f follows links).
+// A flag missing here leaves its value among the words, where the first is taken for the pattern and the pattern for a
+// file (`rg --color never "release notes" src`), so each list holds every such flag in the program's own help: GNU and
+// BSD grep with git grep, rg 16 and ag 2.2. A value that is optional and joined with `=` (grep's `--color=never`) is
+// not one
 const GREP_FLAGS = {
   grep: {
-    values: ['-e', '-f', '-d', '-D', '--regexp', '--file', '--include', '--exclude', '--exclude-dir', '--label', '--binary-files', '--devices', '--directories', '--max-depth', '--threads'],
+    values: [
+      '-e', '-f', '-d', '-D', '--regexp', '--file', '--include', '--exclude', '--exclude-from', '--exclude-dir', '--include-dir', '--label',
+      '--binary-files', '--devices', '--directories', '--group-separator', '--max-depth', '--threads', '--parent-basename',
+    ],
     patterns: ['-e', '-f', '--regexp', '--file'],
   },
   rg: {
-    values: ['-e', '-f', '-g', '-t', '-T', '-j', '-M', '-E', '-r', '-d', '--regexp', '--file', '--glob', '--iglob', '--type', '--type-not', '--threads', '--max-columns', '--encoding', '--replace', '--max-depth', '--sort', '--sortr', '--pre', '--pre-glob'],
+    values: [
+      '-e', '-f', '-g', '-G', '-t', '-T', '-j', '-M', '-E', '-r', '-d', '--regexp', '--file', '--glob', '--glob-not', '--iglob', '--type',
+      '--type-not', '--type-add', '--type-clear', '--threads', '--max-columns', '--encoding', '--engine', '--replace', '--max-depth',
+      '--maxdepth', '--max-filesize', '--max-bytes', '--sort', '--sortr', '--pre', '--pre-glob', '--ignore-file', '--in', '--in0', '--color',
+      '--colors', '--context-separator', '--field-context-separator', '--field-match-separator', '--path-separator', '--hostname-bin',
+      '--hyperlink-format', '--dfa-size-limit', '--regex-size-limit', '--generate',
+    ],
     patterns: ['-e', '-f', '--regexp', '--file'],
   },
   ag: {
-    values: ['-G', '-g', '-p', '--ignore', '--ignore-dir', '--depth', '--pager', '--path-to-ignore', '--file-search-regex'],
+    values: [
+      '-G', '-g', '-p', '-W', '--ignore', '--ignore-dir', '--depth', '--pager', '--path-to-ignore', '--file-search-regex', '--filename-pattern',
+      '--width', '--workers', '--color-line-number', '--color-match', '--color-path', '--ackmate-dir-filter',
+    ],
     patterns: [],
   },
 }
