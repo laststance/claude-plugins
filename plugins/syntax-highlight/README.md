@@ -51,6 +51,8 @@ Requires `node` on the PATH and Claude Code 2.1.330 or later (tested with 2.1.33
 
 A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Claude Code's own rows under a block stay Claude Code's and are drawn below the coloured text, behind their own `⎿`: the "Shell cwd was reset" notice a command leaves after a `cd` out of the project, stderr, the diff of files a command changed, and images it viewed. The one exception is collapsed: the one-time note Claude Code adds under the first edit diff of a session is not drawn under a coloured block. Blocks with errors, interrupts or background tasks are left to Claude Code, and so are blocks holding terminal control codes (an ANSI colour) and expanded blocks too large to draw in one tree (some 5,000 short lines, or 100,000 characters). On the main screen, an expanded block that Claude Code drew before its colours were ready (as a resumed session does) stays as drawn when it is taller than the screen, its stderr rows counted, or has an edit diff or images under it, whose height only Claude Code knows: the screen cannot redraw the rows that scrolled off. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
 
+**Grouped calls.** Claude Code folds a run of reads and searches (`ls`, `cat`, `grep` and the like) into one line, and this mod unfolds it so every command is highlighted. Each of those rows shows its output under the command, coloured like any other: folded to three rows (and a long command to `collapsedLines`) as a collapsed result is, in full under ctrl+o and in verbose mode. Claude Code draws such a row itself, command and all, when the mod cannot draw it whole: a call that left a "Shell cwd was reset" notice, changed files or viewed images, printed nothing, failed or was interrupted. In fullscreen mode (`tui: fullscreen`) grouped rows show the command only; press ctrl+o to see their output. Why: [docs/adr/0003](docs/adr/0003-grouped-rows-draw-their-output.md).
+
 Claude Code itself hides the output of some lone file reads (a bare `cat file.md` or `jq . file.json`), so there is nothing to colour there.
 
 ## Configure
@@ -91,7 +93,7 @@ The first runs the planning and rendering tests in Claude Code's mod test kit; t
 
 ## Credits and licenses
 
-Forked from [Lucasbk38/claude-syntax-cmd](https://github.com/Lucasbk38/claude-syntax-cmd) at `a791d1d` (v0.2.3), MIT. Why a fork and not a companion mod: [docs/adr/0001](docs/adr/0001-fork-syntax-cmd-and-draw-output-blocks.md). Why Claude Code still draws the rows under a block: [docs/adr/0002](docs/adr/0002-claude-code-draws-sibling-rows.md).
+Forked from [Lucasbk38/claude-syntax-cmd](https://github.com/Lucasbk38/claude-syntax-cmd) at `a791d1d` (v0.2.3), MIT. Why a fork and not a companion mod: [docs/adr/0001](docs/adr/0001-fork-syntax-cmd-and-draw-output-blocks.md). Why Claude Code still draws the rows under a block: [docs/adr/0002](docs/adr/0002-claude-code-draws-sibling-rows.md). How a grouped call's row draws its output: [docs/adr/0003](docs/adr/0003-grouped-rows-draw-their-output.md).
 
 Bundled TextMate grammars and themes come from [tm-grammars and tm-themes](https://github.com/shikijs/textmate-grammars-themes) (MIT); `vscode-textmate` and `vscode-oniguruma` are vendored (MIT). See `bundled/` and `vendor/` for their licenses.
 

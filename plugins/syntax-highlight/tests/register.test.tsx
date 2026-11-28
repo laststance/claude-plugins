@@ -13,8 +13,11 @@ const CWD_NOTICE = '\nShell cwd was reset to /Users/me/project'
 const MEMORY_COMMAND = 'cd /Users/me/.claude/projects/app/memory; cat deploy-lock.md'
 const MEMORY_STDOUT = '---\nname: deploy-lock\nmetadata:\n  type: feedback\n---\n\n**Why:** the lock check reads the runner log first.\n'
 
-/** What the engine stand-in saw: each result Claude Code was asked to draw, the worker's inputs, the redraws asked. */
-type Seen = { drawnByClaudeCode: Record<string, unknown>[]; workerInputs: Record<string, unknown>[]; invalidations: number }
+/**
+ * What the engine stand-in saw: each result Claude Code was asked to draw, the worker's inputs, the redraws asked, and
+ * for each group Claude Code was asked to draw, whether it reached it unfolded into rows.
+ */
+type Seen = { drawnByClaudeCode: Record<string, unknown>[]; workerInputs: Record<string, unknown>[]; invalidations: number; unfolded: boolean[] }
 
 /**
  * Stands in for Claude Code beneath the mod: draws any row it is asked for as one Text, answers the worker
@@ -27,9 +30,10 @@ type Seen = { drawnByClaudeCode: Record<string, unknown>[]; workerInputs: Record
  * // after a ToolResult that Claude Code drew: seen.drawnByClaudeCode[0] → the output record it was given
  */
 const standInForClaudeCode = (on: On): Seen => {
-  const seen: Seen = { drawnByClaudeCode: [], workerInputs: [], invalidations: 0 }
+  const seen: Seen = { drawnByClaudeCode: [], workerInputs: [], invalidations: 0, unfolded: [] }
   on('ui.render', ($, e) => {
     if (e.component === 'ToolResult') seen.drawnByClaudeCode.push(e.props.output as Record<string, unknown>)
+    if (e.component === 'ToolGroup') seen.unfolded.push(e.props.isExpanded)
     const { Text } = $.ui.resolve(e)
 
     return <Text>{CLAUDE_CODE_DRAWS}</Text>
@@ -1086,4 +1090,383 @@ test('a Bash call whose colours are not back within 1.5 s returns its result the
     while (held.length > 0) held.shift()?.()
     await colouringsKept(running)
   }
+})
+
+// ---- grouped rows: a Bash call drawn as a row of a ToolGroup draws its own result (0.1.3) ----
+
+// the terminal's main screen, the one place grouped rows draw their output
+const MAIN_SCREEN = { columns: 80, rows: 40, isFullscreen: false } as const
+// the stand-in worker colours every line red; drawn at the output's strength (0.75) and the command's (0.55)
+const OUTPUT_RED = '#e62626'
+const COMMAND_RED = '#d14545'
+
+/** A Bash result with only a stdout. */
+const stdoutOf = (stdout: string) => ({ stdout, stderr: '', interrupted: false, isImage: false })
+
+/** A run of Bash calls as Claude Code asks a ToolGroup hook to draw it: collapsed, or expanded by ctrl+o or verbose. */
+const group = (requestId: string, ids: string[], isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen: boolean } = MAIN_SCREEN) =>
+  ({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolGroup',
+    requestId,
+    viewport,
+    props: {
+      calls: ids.map(id => ({ tool_use_id: id, tool: 'Bash', input: { command: 'cat notes.md' }, isRunning: false, isErrored: false, isInterrupted: false })),
+      isActive: false,
+      isExpanded,
+    },
+  }) as const
+
+/** A Bash call's row as a group's row is drawn: expanded, with its result in `output` once it has one. */
+const rowWithResult = (id: string, command: string, output: Record<string, unknown> | undefined, viewport: { columns: number; rows: number; isFullscreen: boolean } = MAIN_SCREEN, state: { isRunning?: boolean; isErrored?: boolean } = {}) =>
+  ({
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: id,
+    viewport,
+    props: { tool_use_id: id, tool: 'Bash', input: { command }, isRunning: state.isRunning ?? false, isErrored: state.isErrored ?? false, isInterrupted: false, isExpanded: true, output },
+  }) as const
+
+/** Every Text of a drawing, as its shown text and its colour. */
+const textsOf = async (drawing: { findAll: (query: { type: string }) => Promise<Array<{ text: string; props: Record<string, unknown> }>> }) =>
+  (await drawing.findAll({ type: 'Text' })).map(found => ({ text: found.text, color: found.props.color }))
+
+// Value: protects=a grouped Bash call's output is on screen and coloured; fails_when=the row holds no output text, the output token has no colour, or the group is not unfolded; why_new=no test mounted a group; seam=none; no_claim=grammar choice (the stand-in colours every line red) and Claude Code's own unfolding (the kit mounts the row)
+test('a Bash call in a group shows its output under its command, coloured, with the group unfolded into rows', async ($, on) => {
+  // Arrange
+  const seen = standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-ac1', ['grouped-ac1'], false))
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('grouped-ac1', 'cat release.md', stdoutOf('# Release\nalpha one\n')))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  const texts = await textsOf(row)
+  expect(seen.unfolded.at(-1)).toBe(true)
+  expect(texts).toContainEqual({ text: 'cat release.md', color: COMMAND_RED })
+  expect(texts).toContainEqual({ text: '# Release', color: OUTPUT_RED })
+  expect(texts).toContainEqual({ text: 'alpha one', color: OUTPUT_RED })
+  expect(texts.map(t => t.text)).not.toContain(CLAUDE_CODE_DRAWS)
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=output of a group this mod unfolded folds like a collapsed result; fails_when=every line is dumped or the hint count is wrong; why_new=grouped rows untested; seam=none; no_claim=wrapping at widths other than 80 columns
+test('a long output in a group the mod unfolded shows three rows and how many more ctrl+o shows', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-fold', ['grouped-fold'], false))
+  const tenLines = `${Array.from({ length: 10 }, (_, n) => `line ${n}`).join('\n')}\n`
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('grouped-fold', 'cat ten.txt', stdoutOf(tenLines)))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  const texts = (await textsOf(row)).map(t => t.text)
+  expect(texts).toContain('line 2')
+  expect(texts).not.toContain('line 3')
+  expect(texts).toContain('… +7 lines (ctrl+o to expand)')
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=ctrl+o and verbose show every line of a grouped call; fails_when=a group Claude Code expanded still folds; why_new=grouped rows untested; seam=none; no_claim=the real ctrl+o redraw (live check)
+test('the same output in a group Claude Code expanded (ctrl+o, verbose) shows every line', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const expanded = await $.ui.mount(group('group-full', ['grouped-full'], true))
+  const tenLines = `${Array.from({ length: 10 }, (_, n) => `line ${n}`).join('\n')}\n`
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('grouped-full', 'cat ten.txt', stdoutOf(tenLines)))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  const texts = (await textsOf(row)).map(t => t.text)
+  expect(texts).toContain('line 9')
+  expect(texts.some(text => text.includes('ctrl+o to expand'))).toBe(false)
+  for (const handle of [row, expanded]) await handle.unmount()
+})
+
+// Value: protects=no part of a result is lost for grouped rows the mod cannot draw whole; fails_when=the mod draws its own tree for a cwd notice, an empty stdout or an error; why_new=grouped rows untested; seam=none; no_claim=what Claude Code draws for them (the stand-in draws one Text)
+test('a grouped call with a cwd notice, with no output, or that failed is drawn whole by Claude Code', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-ac3', ['grouped-notice', 'grouped-empty', 'grouped-failed'], false))
+
+  // Act
+  const withNotice = await $.ui.mount(rowWithResult('grouped-notice', 'cd /tmp/site && cat a.md', { ...stdoutOf('# A\n'), stderr: CWD_NOTICE }))
+  const withNoOutput = await $.ui.mount(rowWithResult('grouped-empty', 'grep -n zeta a.md', { ...stdoutOf(''), returnCodeInterpretation: 'No matches found' }))
+  const failed = await $.ui.mount(rowWithResult('grouped-failed', 'cat missing.md', 'cat: missing.md: No such file or directory' as never, MAIN_SCREEN, { isErrored: true }))
+  for (const handle of [withNotice, withNoOutput, failed]) await handle.redraw()
+
+  // Assert
+  expect((await textsOf(withNotice)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await textsOf(withNoOutput)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await textsOf(failed)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  for (const handle of [failed, withNoOutput, withNotice, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a standalone row never shows its output in the command row (its ToolResult shows it); fails_when=a ToolUse row outside any group holds output rows; why_new=the inline path is new; seam=none; no_claim=none beyond protects
+test('a standalone Bash row drawn expanded with its result holds only the command', async ($, on) => {
+  // Arrange: no group names this call
+  standInForClaudeCode(on)
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('standalone-ac4', 'cat solo.md', stdoutOf('# Solo\nbody\n')))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  const texts = (await textsOf(row)).map(t => t.text)
+  expect(texts).toContain('cat solo.md')
+  expect(texts).not.toContain('# Solo')
+  expect(texts).not.toContain('body')
+  await row.unmount()
+})
+
+// Value: protects=the fullscreen transcript, which draws grouped calls standalone, never shows an output twice; fails_when=output rows are drawn with isFullscreen true; why_new=the inline path is new; seam=none; no_claim=fullscreen main-view outputs stay hidden (a known limit); other surfaces not mounted
+test('in fullscreen a grouped Bash row holds only the command, as in 0.1.2', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const fullscreen = { columns: 80, rows: 40, isFullscreen: true }
+  const collapsed = await $.ui.mount(group('group-ac5', ['grouped-ac5'], false, fullscreen))
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('grouped-ac5', 'cat wide.md', stdoutOf('# Wide\nbody\n'), fullscreen))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  const texts = (await textsOf(row)).map(t => t.text)
+  expect(texts).toContain('cat wide.md')
+  expect(texts).not.toContain('# Wide')
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a grouped call's output is visible before its colours arrive, and coloured after; fails_when=the row is empty or Claude Code's while colours are pending, or stays plain after; why_new=grouped rows untested; seam=none; no_claim=timing of a real worker
+test('a grouped row drawn before its colours are back shows command and output plain, then coloured', async ($, on) => {
+  // Arrange: every worker is held until the test lets it go
+  const held: Array<() => void> = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    await new Promise<void>(resolve => held.push(resolve))
+    const lines = String(asked.output ?? asked.command ?? '').split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const collapsed = await $.ui.mount(group('group-ac6', ['grouped-ac6'], false))
+  const row = await $.ui.mount(rowWithResult('grouped-ac6', 'cat pending.md', stdoutOf('# Pending\n')))
+  const whilePending = await textsOf(row)
+
+  // Act: both workers answer
+  while (held.length > 0) held.shift()?.()
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  expect(whilePending).toContainEqual({ text: 'cat pending.md', color: undefined })
+  expect(whilePending).toContainEqual({ text: '# Pending', color: undefined })
+  expect(await textsOf(row)).toContainEqual({ text: '# Pending', color: OUTPUT_RED })
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=ctrl+o toggles redraw grouped rows, with no endless redraw; fails_when=a fold flip asks for no redraw, or one call asks for more than 20; why_new=the redraw request is new; seam=none; no_claim=that the screen shows the redraw (live check)
+test('folding or unfolding a group asks for one redraw of its rows, and for no more after twenty', async ($, on) => {
+  // Arrange: a grouped row drawn and coloured
+  const seen = standInForClaudeCode(on)
+  const asGroup = group('group-ac7', ['grouped-ac7'], false)
+  const collapsed = await $.ui.mount(asGroup)
+  const row = await $.ui.mount(rowWithResult('grouped-ac7', 'cat toggled.md', stdoutOf('# Toggled\n')))
+  await row.redraw()
+  await row.redraw()
+  const before = seen.invalidations
+
+  // Act: ctrl+o once, then 24 more times
+  await collapsed.redraw({ ...asGroup.props, isExpanded: true })
+  await row.redraw()
+  const afterOne = seen.invalidations
+  for (let n = 0; n < 24; n++) {
+    await collapsed.redraw({ ...asGroup.props, isExpanded: n % 2 === 1 })
+    await row.redraw()
+  }
+
+  // Assert
+  expect(afterOne - before).toBe(1)
+  expect(seen.invalidations - before).toBe(20)
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a call that leaves its group shows its output once; fails_when=the command row still draws the output after a ToolResult was drawn for the call; why_new=the standalone test uses a call no group ever named; seam=none; no_claim=whether Claude Code ever regroups a call (the kit raises the events)
+test('a grouped call later drawn standalone shows its output once, in its own result block', async ($, on) => {
+  // Arrange: a grouped row drawn with its output
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-o2', ['regrouped-o2'], false))
+  const output = stdoutOf('# Moved\n')
+  const row = await $.ui.mount(rowWithResult('regrouped-o2', 'cat moved.md', output))
+  await row.redraw()
+  await row.redraw()
+  const whileGrouped = (await textsOf(row)).map(t => t.text)
+
+  // Act: the group is gone and Claude Code draws the call's result on its own, as it does for a standalone row
+  await collapsed.unmount()
+  const block = await $.ui.mount({ ...outputBlock('regrouped-o2', output), viewport: MAIN_SCREEN })
+  await block.redraw()
+  await row.redraw()
+
+  // Assert
+  expect(whileGrouped).toContain('# Moved')
+  expect((await textsOf(row)).map(t => t.text)).not.toContain('# Moved')
+  expect((await textsOf(block)).map(t => t.text)).toContain('# Moved')
+  for (const handle of [block, row]) await handle.unmount()
+})
+
+// Value: protects=two views that undo each other's record of a call cannot redraw without end; fails_when=alternating group and result events keep asking for redraws; why_new=the fold test covers flips of one group only; seam=none; no_claim=that Claude Code ever raises both for one call
+test('a call drawn in turn as a grouped row and as a standalone result stops asking for redraws', async ($, on) => {
+  // Arrange
+  const seen = standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-e2', ['flapping-e2'], false))
+  const output = stdoutOf('# Flap\n')
+  const row = await $.ui.mount(rowWithResult('flapping-e2', 'cat flap.md', output))
+  await row.redraw()
+  await row.redraw()
+  const block = await $.ui.mount({ ...outputBlock('flapping-e2', output), viewport: MAIN_SCREEN })
+  const before = seen.invalidations
+
+  // Act: 15 rounds of the row, the group and the result each drawn again, then 3 more
+  const round = async () => {
+    for (const handle of [row, collapsed, row, block]) await handle.redraw()
+  }
+  for (let n = 0; n < 15; n++) await round()
+  const afterFifteen = seen.invalidations
+  for (let n = 0; n < 3; n++) await round()
+
+  // Assert: the first rounds asked, within the bound of 20 for one call, and the last three asked for nothing
+  expect(afterFifteen - before).toBeGreaterThan(0)
+  expect(afterFifteen - before).toBeLessThanOrEqual(20)
+  expect(seen.invalidations - afterFifteen).toBe(0)
+  for (const handle of [block, row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a tall grouped row first drawn plain keeps that styling only in the view it was drawn in, and always shows the current text; fails_when=the row is restyled while too tall to redraw, a rewritten stdout shows the old text, or the fold is lost after ctrl+o is closed; why_new=the existing freeze tests cover ToolResult blocks; seam=none; no_claim=what a real screen keeps in its scrollback
+test('a grouped row taller than the main screen, drawn before its colours, stays plain while expanded, shows a rewritten output, and folds again when the group is collapsed', async ($, on) => {
+  // Arrange: workers held; a 40-line result in a group Claude Code expanded, on a 24-row main screen
+  const held: Array<() => void> = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    await new Promise<void>(resolve => held.push(resolve))
+    const lines = String(asked.output ?? asked.command ?? '').split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const shortScreen = { columns: 80, rows: 24, isFullscreen: false }
+  const asGroup = group('group-o3', ['tall-o3'], true, shortScreen)
+  const expanded = await $.ui.mount(asGroup)
+  const list = (first: string) => stdoutOf(`${[first, ...Array.from({ length: 39 }, (_, n) => `- item ${n}`)].join('\n')}\n`)
+  const asRow = rowWithResult('tall-o3', 'cat tall.md', list('TOKEN=abc123'), shortScreen)
+  const row = await $.ui.mount(asRow)
+
+  // Act: the colours come back; another mod rewrites the record; then ctrl+o is closed
+  while (held.length > 0) held.shift()?.()
+  await row.redraw()
+  await row.redraw()
+  const onceColoursAreBack = await textsOf(row)
+  await row.redraw({ ...asRow.props, output: list('TOKEN=•••') })
+  while (held.length > 0) held.shift()?.()
+  await row.redraw({ ...asRow.props, output: list('TOKEN=•••') })
+  const afterRewrite = (await textsOf(row)).map(t => t.text)
+  await expanded.redraw({ ...asGroup.props, isExpanded: false })
+  await row.redraw({ ...asRow.props, output: list('TOKEN=•••') })
+  const afterCollapse = (await textsOf(row)).map(t => t.text)
+
+  // Assert
+  expect(onceColoursAreBack).toContainEqual({ text: 'TOKEN=abc123', color: undefined })
+  expect(onceColoursAreBack).toContainEqual({ text: '- item 38', color: undefined })
+  expect(afterRewrite).toContain('TOKEN=•••')
+  expect(afterRewrite).not.toContain('TOKEN=abc123')
+  expect(afterCollapse).toContain('… +37 lines (ctrl+o to expand)')
+  expect(afterCollapse).not.toContain('- item 38')
+  for (const handle of [row, expanded]) await handle.unmount()
+})
+
+// Value: protects=the collapsedLines option applies to rows of a group the mod unfolded, running or done; fails_when=a long grouped command is drawn in full, or changes height when its result arrives; why_new=no test mounted a grouped row; seam=none; no_claim=the wrapped width of one long line
+test('a long command in a group the mod unfolded shows three lines while it runs and after, with its output under it', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-r1', ['long-r1'], false))
+  const command = 'ls -l \\\n  notes.md \\\n  data.json \\\n  long.md \\\n  LAST-ARGUMENT.md'
+  const asRunning = rowWithResult('long-r1', command, undefined, MAIN_SCREEN, { isRunning: true })
+
+  // Act
+  const row = await $.ui.mount(asRunning)
+  await row.redraw()
+  const whileRunning = (await textsOf(row)).map(t => t.text)
+  await row.redraw({ ...asRunning.props, isRunning: false, output: stdoutOf('notes.md\n') })
+  await row.redraw({ ...asRunning.props, isRunning: false, output: stdoutOf('notes.md\n') })
+  const whenDone = (await textsOf(row)).map(t => t.text)
+
+  // Assert
+  for (const texts of [whileRunning, whenDone]) {
+    expect(texts).toContain('  data.json \\')
+    expect(texts).not.toContain('  LAST-ARGUMENT.md')
+    expect(texts).toContain('      … +2 lines) (ctrl+o to expand)')
+  }
+  expect(whenDone).toContain('notes.md')
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a grouped row too large for one tree is drawn whole by Claude Code, its output kept; fails_when=the size check ignores what the command rows draw around their text and the engine cuts the row's end; why_new=the existing size tests cover ToolResult blocks; seam=none; no_claim=the engine's real bounds (the kit does not enforce the character cut)
+test('a grouped row whose command lines alone pass what one drawing holds is drawn whole by Claude Code', async ($, on) => {
+  // Arrange: 1,400 command lines take 11 nodes each as a grouped row draws them, past the 15,000 the mod allows
+  standInForClaudeCode(on)
+  const expanded = await $.ui.mount(group('group-e1', ['huge-e1'], true))
+  const command = Array.from({ length: 1400 }, (_, n) => `echo ${n} \\`).join('\n')
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('huge-e1', `${command}\necho end`, stdoutOf('end\n')))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  expect((await textsOf(row)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  for (const handle of [row, expanded]) await handle.unmount()
+})
+
+// Value: protects=a row drawn before its group is known (verbose mode draws a resumed group's rows first) gains its output; fails_when=the group event asks for no redraw, or the redrawn row still holds only the command; why_new=the other tests mount the group first; seam=none; no_claim=the order Claude Code raises the events in (live probe)
+test('a row drawn before the group that names it shows only its command, then its output once the group is drawn', async ($, on) => {
+  // Arrange: the row is drawn first, as verbose mode draws a resumed session
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(rowWithResult('early-o5', 'cat early.md', stdoutOf('# Early\n')))
+  await row.redraw()
+  await row.redraw()
+  const beforeGroup = (await textsOf(row)).map(t => t.text)
+  const invalidationsBefore = seen.invalidations
+
+  // Act
+  const expanded = await $.ui.mount(group('group-o5', ['early-o5'], true))
+  await row.redraw()
+  await row.redraw()
+
+  // Assert
+  expect(beforeGroup).not.toContain('# Early')
+  expect(seen.invalidations - invalidationsBefore).toBeGreaterThan(0)
+  expect(await textsOf(row)).toContainEqual({ text: '# Early', color: OUTPUT_RED })
+  for (const handle of [row, expanded]) await handle.unmount()
 })
