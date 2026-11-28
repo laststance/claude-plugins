@@ -9,6 +9,7 @@ export const lex = src => {
   let seg = { words: [], heredocs: [], redirs: [] }
   const pending = []
   let next = null // flag for the next word: 'redir' | 'herestring' | 'heretag'
+  let isStdin = false // the next 'redir' word is the file a `<` reads
   const endSegment = op => { if (seg.words.length || seg.heredocs.length) { seg.op = op; segments.push(seg) } seg = { words: [], heredocs: [], redirs: [] } }
 
   let i = 0
@@ -37,8 +38,12 @@ export const lex = src => {
         endSegment('\n')
       } else if (/<<<$|<<-?$/.test(o.replace(/\d+/g, '').replace(/&.*/, ''))) {
         next = o.includes('<<<') ? 'herestring' : (o.includes('-') ? 'heretagStrip' : 'heretag')
+        // a heredoc or here-string feeds stdin unless it names another descriptor (`3<<< text`)
+        isStdin = /^0?</.test(o)
       } else if (/[<>]/.test(o)) {
         next = /&\d*-?$/.test(o) ? null : 'redir'
+        // `< file` (or `0< file`) feeds the segment's stdin: the word after it is kept as seg.stdin too
+        isStdin = /^0?<$/.test(o)
       } else if (o !== '&>' && o !== '&>>') {
         endSegment(o)
       } else next = 'redir'
@@ -84,11 +89,22 @@ export const lex = src => {
       } else { push(ch, i); i++ }
     }
     const word = { start, end: Math.min(i, src.length), value, map }
+    // seg.stdin is what the last redirection of stdin reads, as the shell applies them left to right: the file after
+    // `<`, or a word with no name for a heredoc or a here-string, whose text has no file
     if (next === 'heretag' || next === 'heretagStrip') {
       const h = { tag: value, strip: next === 'heretagStrip', body: null }
       pending.push(h); seg.heredocs.push(h)
-    } else if (next === 'herestring') seg.herestring = word
-    else if (next === 'redir') seg.redirs.push(word)
+      if (isStdin) seg.stdin = { ...word, value: '' }
+      isStdin = false
+    } else if (next === 'herestring') {
+      seg.herestring = word
+      if (isStdin) seg.stdin = { ...word, value: '' }
+      isStdin = false
+    } else if (next === 'redir') {
+      seg.redirs.push(word)
+      if (isStdin) seg.stdin = word
+      isStdin = false
+    }
     else seg.words.push(word)
     next = null
   }

@@ -1,6 +1,6 @@
 {
   "name": "syntax-highlight",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Syntax-highlights Claude's Bash commands and what they print (Markdown, JSON, diffs, ls -l listings, grep hits, plutil -p...) with your editor's theme and TextMate grammars, and lets Claude show highlighted code on request",
   "author": {
     "name": "Laststance.io",
@@ -20,9 +20,9 @@
     "editor": {
       "type": "string",
       "title": "Editor",
-      "description": "Whose colour theme and grammars to use. auto = the IDE Claude Code is connected to, else $VISUAL/$EDITOR, else the first editor found on this machine.",
+      "description": "Whose colour theme and grammars to use. auto = the IDE Claude Code is connected to, else $VISUAL/$EDITOR, else the first editor found on this machine. bundled = the grammars and themes that ship with the mod, reading no editor.",
       "default": "auto",
-      "options": ["auto", "vscode", "vscode-insiders", "cursor", "windsurf", "vscodium", "zed", "sublime", "jetbrains", "neovim", "helix", "vim"]
+      "options": ["auto", "vscode", "vscode-insiders", "cursor", "windsurf", "vscodium", "zed", "sublime", "jetbrains", "neovim", "helix", "vim", "bundled"]
     },
     "theme": {
       "type": "string",

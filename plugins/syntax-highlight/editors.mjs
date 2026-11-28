@@ -105,14 +105,30 @@ const fromEnv = () => {
   return null
 }
 
+/**
+ * The `editor` option's value for reading no editor: the grammars and themes that ship with the mod, whatever this
+ * machine has installed. It is also the id {@link detectEditor} gives when it finds no editor.
+ */
+export const BUNDLED = 'bundled'
+
+/**
+ * Which editor's theme and grammars the worker uses. Called once by the worker (tokenize.mjs), with the `editor`
+ * option.
+ *
+ * @param want - The option: an editor's id, {@link BUNDLED}, or `auto` (or nothing) to look for one.
+ * @returns the editor's id and how it was chosen
+ * @example
+ * detectEditor('bundled') // => { id: 'bundled', how: 'configured' }
+ */
 export const detectEditor = want => {
+  if (want === BUNDLED) return { id: BUNDLED, how: 'configured' }
   if (want && want !== 'auto' && EDITORS.includes(want)) return { id: want, how: 'configured' }
   const ide = fromClaudeIde()
   if (ide) return { id: ide, how: 'the IDE Claude Code is connected to' }
   const env = fromEnv()
   if (env && isInstalled(env)) return { id: env, how: '$VISUAL / $EDITOR' }
   const found = EDITORS.find(isInstalled)
-  return found ? { id: found, how: 'found installed' } : { id: 'bundled', how: 'no editor found' }
+  return found ? { id: found, how: 'found installed' } : { id: BUNDLED, how: 'no editor found' }
 }
 
 // ---------- the theme name each editor has selected ----------
@@ -245,8 +261,18 @@ const installedThemes = () => {
 
 export const extensionRoots = ids => ids.flatMap(id => [VSCODE_FAMILY[id].ext, ...VSCODE_FAMILY[id].app]).filter(isDir)
 
-// -> { name, source, theme: {colors, tokenColors} }
-export const resolveTheme = (editorId, override) => {
+/**
+ * The colour theme to draw with: the one named, else the editor's own, found among installed VS Code themes, the
+ * editor's schemes and the bundled set. Called once by the worker (tokenize.mjs).
+ *
+ * @param editorId - The editor, from {@link detectEditor}.
+ * @param override - The `theme` option; empty for the editor's current theme.
+ * @param readsInstalled - False for `editor: bundled`: no installed editor's themes are read, only the bundled set.
+ * @returns `{ name, source, theme: { colors, tokenColors } }`
+ * @example
+ * resolveTheme('bundled', 'dark-plus', false).source // => "bundled theme (closest to the editor's)"
+ */
+export const resolveTheme = (editorId, override, readsInstalled = true) => {
   const wanted = override || themeNameOf(editorId) || null
   const bundled = bundledThemes()
   const asBundled = (id, source) => ({ name: wanted ?? id, source, theme: loadVsCodeTheme(bundled.find(b => b.id === id).file) })
@@ -258,7 +284,7 @@ export const resolveTheme = (editorId, override) => {
       const known = bundled.find(b => norm(b.id) === n0)?.id ?? ALIASES[n0]
       if (known) return asBundled(known, 'bundled theme (closest to the editor\'s)')
     }
-    const hit = installedThemes().find(t => t.names.some(n => norm(n) === norm(wanted)))
+    const hit = readsInstalled ? installedThemes().find(t => t.names.some(n => norm(n) === norm(wanted))) : undefined
     if (hit) return { name: wanted, source: 'installed VS Code theme', theme: loadVsCodeTheme(hit.file) }
 
     if (editorId === 'sublime') {
@@ -279,9 +305,18 @@ export const resolveTheme = (editorId, override) => {
   return asBundled('dark-plus', 'bundled theme (default)')
 }
 
-// scope -> grammar file, the editor's own VS Code-format grammars first, then any other installed one, then the bundled set
-export const findGrammars = editorId => {
-  const order = [...(VSCODE_FAMILY[editorId] ? [editorId] : []), ...Object.keys(VSCODE_FAMILY).filter(k => k !== editorId)]
+/**
+ * Where each grammar is: the editor's own VS Code-format grammars first, then any other installed one, then the
+ * bundled set. Called once by the worker (tokenize.mjs).
+ *
+ * @param editorId - The editor, from {@link detectEditor}.
+ * @param readsInstalled - False for `editor: bundled`: no installed editor's extensions are read, only the bundled set.
+ * @returns `files` (scope -> grammar file) and `languages` (language id, alias or extension -> scope)
+ * @example
+ * findGrammars('bundled', false).languages.md // => 'text.html.markdown'
+ */
+export const findGrammars = (editorId, readsInstalled = true) => {
+  const order = readsInstalled ? [...(VSCODE_FAMILY[editorId] ? [editorId] : []), ...Object.keys(VSCODE_FAMILY).filter(k => k !== editorId)] : []
   const files = {}
   const languages = {} // language id / alias / extension -> scope
   for (const root of extensionRoots(order)) {

@@ -47,9 +47,9 @@ Requires `node` on the PATH and Claude Code 2.1.330 or later (tested with 2.1.33
   | `git status` | `--short` status letters, `## branch...upstream`, `modified:` rows |
   | `wc` | counts and `total` |
 
-  Inside a Language block only rows nothing else prints keep their shape: an `ls -l` row, a `path:12:` hit whose path has a `.` or `/` and no space, or that is in a file or folder with a space the command grepped (so `Makefile:12:` stays in the Language), a `wc` row (a count padded to 8 columns, counts before a name with a `.` or `/` and no space or before a file the command gave `wc`, or `total`), a `git status --short` row of status letters and one path, `## branch...upstream`. So `wc -l *.md && cat README.md` colours both, while a heading (`## Usage`), a time (`09:30`), an indented number (`  3 items`), a line opening with status-like capitals (`MR 12 is merged`) or a frontmatter key ending in `:` stays in the Language.
+  Inside a Language block only rows nothing else prints keep their shape: an `ls -l` row, a `path:12:` hit whose path has a `.` or `/` and no space, or that is in a file or folder the command grepped (so `Makefile:12:` stays in the Language unless the command grepped `Makefile`), the context rows beside such a hit that name the same file and the next line (`path-13-`, from `grep -A 1`), a `wc` row (a count padded to 8 columns, counts before a name with a `.` or `/` and no space or before a file the command gave `wc`, or `total`), a `git status --short` row of status letters and one path, `## branch...upstream`. So `wc -l *.md && cat README.md` colours both, while a heading (`## Usage`), a time (`09:30`), an indented number (`  3 items`), a line opening with status-like capitals (`MR 12 is merged`) or a frontmatter key ending in `:` stays in the Language.
 
-A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Claude Code's own rows under a block stay Claude Code's and are drawn below the coloured text, behind their own `⎿`: the "Shell cwd was reset" notice a command leaves after a `cd` out of the project, stderr, the diff of files a command changed, and images it viewed. The one exception is collapsed: the one-time note Claude Code adds under the first edit diff of a session is not drawn under a coloured block. Blocks with errors, interrupts or background tasks are left to Claude Code, and so are blocks holding terminal control codes (an ANSI colour) and expanded blocks too large to draw in one tree (some 5,000 short lines). On the main screen, an expanded block taller than the screen that Claude Code drew before its colours were ready (as a resumed session does) stays as drawn: the screen cannot redraw the rows of it that scrolled off. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
+A block is drawn as Claude Code draws it, coloured or not: the same indent, and when collapsed the same fold (`… +N lines (ctrl+o to expand)`). Claude Code's own rows under a block stay Claude Code's and are drawn below the coloured text, behind their own `⎿`: the "Shell cwd was reset" notice a command leaves after a `cd` out of the project, stderr, the diff of files a command changed, and images it viewed. The one exception is collapsed: the one-time note Claude Code adds under the first edit diff of a session is not drawn under a coloured block. Blocks with errors, interrupts or background tasks are left to Claude Code, and so are blocks holding terminal control codes (an ANSI colour) and expanded blocks too large to draw in one tree (some 5,000 short lines, or 100,000 characters). On the main screen, an expanded block that Claude Code drew before its colours were ready (as a resumed session does) stays as drawn when it is taller than the screen, its stderr rows counted, or has an edit diff or images under it, whose height only Claude Code knows: the screen cannot redraw the rows that scrolled off. Past 2,000 lines or 200 KB, the rest of a block is drawn without colour.
 
 Claude Code itself hides the output of some lone file reads (a bare `cat file.md` or `jq . file.json`), so there is nothing to colour there.
 
@@ -59,14 +59,14 @@ In Claude Code: `/config`, then the `syntax-highlight` rows.
 
 | Option | Default | Meaning |
 | --- | --- | --- |
-| `editor` | `auto` | whose theme and grammars to use (VS Code, Cursor, Windsurf, VSCodium, Zed, Sublime Text, JetBrains, Neovim, Helix, Vim) |
+| `editor` | `auto` | whose theme and grammars to use (VS Code, Cursor, Windsurf, VSCodium, Zed, Sublime Text, JetBrains, Neovim, Helix, Vim), or `bundled` |
 | `theme` | empty | theme name override (e.g. `One Dark Pro`) |
 | `strength` | `0.55` | colour strength of Bash commands (0 grey, 1 full) |
 | `outputStrength` | `0.75` | same for what a command prints; uncoloured text stays as it is |
 | `codeStrength` | `1` | same for `show_code` output |
 | `collapsedLines` | `3` | lines of a long command shown before "ctrl+o to expand" |
 
-`editor: auto` picks the IDE Claude Code is connected to, else `$VISUAL`/`$EDITOR`, else the first editor found.
+`editor: auto` picks the IDE Claude Code is connected to, else `$VISUAL`/`$EDITOR`, else the first editor found. `editor: bundled` reads no editor on this machine: it draws with the grammars and themes that ship with the mod (Dark+, or the bundled theme `theme` names), so the colours are the same on every machine.
 
 ## Runners (code inside commands)
 
