@@ -75,9 +75,12 @@ const ROW_FRAME_CHARACTERS = 120
 // A redraw asked for a grouped row (its group folded or unfolded, or was learned after the row was drawn) waits this
 // long, so the group events of one drawing pass ask for one redraw between them
 const REGROUP_REDRAW_DELAY_MS = 50
-// A call asks for at most this many such redraws: two views of one call that each undid the other's record would
-// otherwise redraw without end
+// A call asks for at most this many such redraws in one burst: two views of one call that each undid the other's record
+// would otherwise redraw without end
 const MAX_REGROUP_REDRAWS = 20
+// A burst ends once no such redraw has been asked for this long, and every call may ask again: a person folding and
+// unfolding a group does so seconds apart, a loop of redraws milliseconds apart
+const REGROUP_QUIET_MS = 2000
 
 // the colours of commands and snippets, by their text
 const cache = new Map<string, Colours>()
@@ -117,8 +120,10 @@ const grouped = new Map<string, boolean>()
 // expanded Bash rows with a result that were answered before any group named them: a group that names one later asks
 // for a redraw, so the row gains its output (verbose mode draws a resumed group's rows before the group)
 const drawnBare = new Map<string, true>()
-// how many redraws each call has asked for as a grouped row, against MAX_REGROUP_REDRAWS
+// how many redraws each call has asked for as a grouped row in the current burst, against MAX_REGROUP_REDRAWS
 const regroupRedraws = new Map<string, number>()
+// every such request made, counted or refused: each one waits REGROUP_QUIET_MS and, when none came after it, ends the burst
+let regroupAsks = 0
 // whether a redraw for grouped rows is already waiting out its delay
 let isRegroupRedrawAsked = false
 // grouped rows first drawn before their colours were back and too tall for the main screen to redraw, by call and
@@ -659,8 +664,10 @@ const isMainScreen = (e: DrawnOn) => e.surface === 'terminal' && e.viewport?.isF
  * gathers the requests of one drawing pass.
  *
  * Called by the `ToolGroup` hook (a group folded or unfolded, or named a row already drawn without its output) and by
- * the `ToolResult` hook (a call drawn standalone after all). Each call may ask {@link MAX_REGROUP_REDRAWS} times; past
- * that its record still changes and its row keeps its last drawing until another redraw reaches it.
+ * the `ToolResult` hook (a call drawn standalone after all). Each call may ask {@link MAX_REGROUP_REDRAWS} times in a
+ * burst; past that its record still changes and its row keeps its last drawing until another redraw reaches it. A
+ * burst ends once {@link REGROUP_QUIET_MS} pass with no request, so ctrl+o pressed seconds apart is never refused,
+ * while requests that keep coming (two views undoing each other's record) stop at the bound.
  *
  * @param $ - The engine interface, for the delay and the redraw.
  * @param ids - The calls whose rows need the redraw.
@@ -668,6 +675,17 @@ const isMainScreen = (e: DrawnOn) => e.surface === 'terminal' && e.viewport?.isF
  * askRegroupRedraw($, ['toolu_01AbC']) // one `$.ui.invalidate('ui.render')` some 50 ms later
  */
 const askRegroupRedraw = ($: EngineInterface, ids: string[]) => {
+  const ask = ++regroupAsks
+  // each request waits out the quiet time on its own; the last one of a burst finds no later request and lets every
+  // call ask again
+  void (async () => {
+    try {
+      await $.clock.sleep(REGROUP_QUIET_MS)
+      if (regroupAsks === ask) regroupRedraws.clear()
+    } catch {
+      // a wait that fails leaves the counts as they are; a later request ends the burst
+    }
+  })()
   let isAllowed = false
   // count the request against each call; one call still under its bound is enough to ask
   for (const id of ids) {
@@ -740,14 +758,17 @@ const groupedRow = ($: EngineInterface, e: GroupedRowEvent, elements: { Box: any
     const shownCommand = isFolded ? commandText.slice(0, options.collapsedLines) : commandText
     // the blank line above the row and both fold hints are counted, as the prompt below is
     let rows = PROMPT_ROWS + 3 + wrappedRows(shownCommand, commandWidth, e.viewport.rows)
-    if (rows <= e.viewport.rows) rows += isFolded ? Math.min(FOLD_ROWS + 1, outputText.length) : wrappedRows(outputText, outputWidth, e.viewport.rows)
+    // folded, the output takes its wrapped rows up to the fold's four (three and the hint, or all four)
+    if (rows <= e.viewport.rows) rows += isFolded ? Math.min(FOLD_ROWS + 1, wrappedRows(outputText, outputWidth, FOLD_ROWS)) : wrappedRows(outputText, outputWidth, e.viewport.rows)
     if (rows > e.viewport.rows) remember(keptPlain, kept, true, MAX_CALLS)
   }
   const isKeptPlain = keptPlain.has(kept)
 
   const isCommandColoured = typeof commandColours === 'object' && !isKeptPlain
   const commandLines = isCommandColoured ? commandColours.lines : plainRows(commandText)
-  if (isCommandColoured) remember(colouredRows, id, true, MAX_CALLS)
+  // a command whose colours were made is noted even when the row is kept plain: once they are pushed out of the cache,
+  // the row is not sent to a worker again, which would push out another row's and so on without end
+  if (typeof commandColours === 'object') remember(colouredRows, id, true, MAX_CALLS)
   const shown = isFolded ? commandLines.slice(0, options.collapsedLines) : commandLines
   const hiddenLines = commandLines.length - shown.length
   const outputLines = typeof outputColours === 'object' && !isKeptPlain ? [...outputColours.lines, ...plainRows(rest)] : plainRows(outputText)

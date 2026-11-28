@@ -1129,6 +1129,55 @@ const rowWithResult = (id: string, command: string, output: Record<string, unkno
     props: { tool_use_id: id, tool: 'Bash', input: { command }, isRunning: state.isRunning ?? false, isErrored: state.isErrored ?? false, isInterrupted: false, isExpanded: true, output },
   }) as const
 
+/** How long the mod waits for redraw requests to go quiet before a call may ask for more than twenty again. */
+const QUIET_MS = 2000
+
+/**
+ * Stands in for Claude Code as {@link standInForClaudeCode} does, but holds the mod's quiet wait until the test ends it:
+ * with every wait over at once, a burst of redraw requests would never reach its bound.
+ *
+ * @param on - The test's `on`.
+ * @returns the redraws asked so far, and `endQuietWait`, which lets the held wait finish
+ * @example
+ * const quiet = standInHoldingTheQuietWait(on)
+ * // ...25 fold changes: quiet.invalidations() → 20
+ * await quiet.endQuietWait() // the next fold change asks again
+ */
+const standInHoldingTheQuietWait = (on: On) => {
+  let invalidations = 0
+  const held: Array<() => void> = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    const lines = String(asked.output ?? asked.command ?? '').split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.invalidate', (_, e, next) => {
+    invalidations++
+
+    return next(e)
+  })
+  on('clock.sleep', async (_, e) => {
+    if (e.ms === QUIET_MS) await new Promise<void>(resolve => held.push(resolve))
+
+    return { value: undefined }
+  })
+
+  return {
+    invalidations: () => invalidations,
+    endQuietWait: async () => {
+      // every request waits on its own: let each wait go, then give the mod a moment to act on the last one
+      while (held.length > 0) held.shift()?.()
+      await new Promise<void>(resolve => setTimeout(() => resolve(), 20))
+    },
+  }
+}
+
 /** Every Text of a drawing, as its shown text and its colour. */
 const textsOf = async (drawing: { findAll: (query: { type: string }) => Promise<Array<{ text: string; props: Record<string, unknown> }>> }) =>
   (await drawing.findAll({ type: 'Text' })).map(found => ({ text: found.text, color: found.props.color }))
@@ -1275,36 +1324,45 @@ test('a grouped row drawn before its colours are back shows command and output p
   await row.redraw()
   await row.redraw()
 
-  // Assert
-  expect(whilePending).toContainEqual({ text: 'cat pending.md', color: undefined })
-  expect(whilePending).toContainEqual({ text: '# Pending', color: undefined })
+  // Assert: both texts are drawn while pending, neither in a colour (the row's own Text holds no colour either way)
+  expect(whilePending.map(t => t.text)).toContain('cat pending.md')
+  expect(whilePending.map(t => t.text)).toContain('# Pending')
+  expect(whilePending).not.toContainEqual({ text: 'cat pending.md', color: COMMAND_RED })
+  expect(whilePending).not.toContainEqual({ text: '# Pending', color: OUTPUT_RED })
   expect(await textsOf(row)).toContainEqual({ text: '# Pending', color: OUTPUT_RED })
   for (const handle of [row, collapsed]) await handle.unmount()
 })
 
-// Value: protects=ctrl+o toggles redraw grouped rows, with no endless redraw; fails_when=a fold flip asks for no redraw, or one call asks for more than 20; why_new=the redraw request is new; seam=none; no_claim=that the screen shows the redraw (live check)
-test('folding or unfolding a group asks for one redraw of its rows, and for no more after twenty', async ($, on) => {
+// Value: protects=ctrl+o toggles redraw grouped rows, a burst of them is bounded, and a later toggle works again; fails_when=a fold flip asks for no redraw, one call asks for more than 20 in a burst, or the bound outlives the burst; why_new=the redraw request is new; seam=none; no_claim=that the screen shows the redraw (live check); the 2 s quiet wait is held by the test, not timed
+test('folding or unfolding a group asks for one redraw of its rows, for no more than twenty in a burst, and again once the burst is over', async ($, on) => {
   // Arrange: a grouped row drawn and coloured
-  const seen = standInForClaudeCode(on)
+  const quiet = standInHoldingTheQuietWait(on)
   const asGroup = group('group-ac7', ['grouped-ac7'], false)
   const collapsed = await $.ui.mount(asGroup)
   const row = await $.ui.mount(rowWithResult('grouped-ac7', 'cat toggled.md', stdoutOf('# Toggled\n')))
   await row.redraw()
   await row.redraw()
-  const before = seen.invalidations
+  const before = quiet.invalidations()
 
-  // Act: ctrl+o once, then 24 more times
+  // Act: ctrl+o once, then 24 more times with no pause; then, after a quiet spell, once more
   await collapsed.redraw({ ...asGroup.props, isExpanded: true })
   await row.redraw()
-  const afterOne = seen.invalidations
+  const afterOne = quiet.invalidations()
   for (let n = 0; n < 24; n++) {
     await collapsed.redraw({ ...asGroup.props, isExpanded: n % 2 === 1 })
     await row.redraw()
   }
+  const afterBurst = quiet.invalidations()
+  await quiet.endQuietWait()
+  await collapsed.redraw({ ...asGroup.props, isExpanded: false })
+  await row.redraw()
+  const afterQuiet = quiet.invalidations()
 
   // Assert
   expect(afterOne - before).toBe(1)
-  expect(seen.invalidations - before).toBe(20)
+  expect(afterBurst - before).toBe(20)
+  expect(afterQuiet - afterBurst).toBe(1)
+  await quiet.endQuietWait()
   for (const handle of [row, collapsed]) await handle.unmount()
 })
 
@@ -1334,28 +1392,29 @@ test('a grouped call later drawn standalone shows its output once, in its own re
 
 // Value: protects=two views that undo each other's record of a call cannot redraw without end; fails_when=alternating group and result events keep asking for redraws; why_new=the fold test covers flips of one group only; seam=none; no_claim=that Claude Code ever raises both for one call
 test('a call drawn in turn as a grouped row and as a standalone result stops asking for redraws', async ($, on) => {
-  // Arrange
-  const seen = standInForClaudeCode(on)
+  // Arrange: the quiet wait is held, so every round belongs to one burst
+  const quiet = standInHoldingTheQuietWait(on)
   const collapsed = await $.ui.mount(group('group-e2', ['flapping-e2'], false))
   const output = stdoutOf('# Flap\n')
   const row = await $.ui.mount(rowWithResult('flapping-e2', 'cat flap.md', output))
   await row.redraw()
   await row.redraw()
   const block = await $.ui.mount({ ...outputBlock('flapping-e2', output), viewport: MAIN_SCREEN })
-  const before = seen.invalidations
+  const before = quiet.invalidations()
 
   // Act: 15 rounds of the row, the group and the result each drawn again, then 3 more
   const round = async () => {
     for (const handle of [row, collapsed, row, block]) await handle.redraw()
   }
   for (let n = 0; n < 15; n++) await round()
-  const afterFifteen = seen.invalidations
+  const afterFifteen = quiet.invalidations()
   for (let n = 0; n < 3; n++) await round()
 
   // Assert: the first rounds asked, within the bound of 20 for one call, and the last three asked for nothing
   expect(afterFifteen - before).toBeGreaterThan(0)
   expect(afterFifteen - before).toBeLessThanOrEqual(20)
-  expect(seen.invalidations - afterFifteen).toBe(0)
+  expect(quiet.invalidations() - afterFifteen).toBe(0)
+  await quiet.endQuietWait()
   for (const handle of [block, row, collapsed]) await handle.unmount()
 })
 
@@ -1397,8 +1456,9 @@ test('a grouped row taller than the main screen, drawn before its colours, stays
   const afterCollapse = (await textsOf(row)).map(t => t.text)
 
   // Assert
-  expect(onceColoursAreBack).toContainEqual({ text: 'TOKEN=abc123', color: undefined })
-  expect(onceColoursAreBack).toContainEqual({ text: '- item 38', color: undefined })
+  expect(onceColoursAreBack.map(t => t.text)).toContain('- item 38')
+  expect(onceColoursAreBack).not.toContainEqual({ text: 'TOKEN=abc123', color: OUTPUT_RED })
+  expect(onceColoursAreBack).not.toContainEqual({ text: '- item 38', color: OUTPUT_RED })
   expect(afterRewrite).toContain('TOKEN=•••')
   expect(afterRewrite).not.toContain('TOKEN=abc123')
   expect(afterCollapse).toContain('… +37 lines (ctrl+o to expand)')
@@ -1461,12 +1521,179 @@ test('a row drawn before the group that names it shows only its command, then it
 
   // Act
   const expanded = await $.ui.mount(group('group-o5', ['early-o5'], true))
+  const afterGroupAlone = (await textsOf(row)).map(t => t.text)
+  await row.redraw()
+  await row.redraw()
+
+  // Assert: the group's drawing alone had the row drawn again with its output, before the test redrew it
+  expect(beforeGroup).not.toContain('# Early')
+  expect(afterGroupAlone).toContain('# Early')
+  expect(seen.invalidations - invalidationsBefore).toBeGreaterThan(0)
+  expect(await textsOf(row)).toContainEqual({ text: '# Early', color: OUTPUT_RED })
+  for (const handle of [row, expanded]) await handle.unmount()
+})
+
+// Value: protects=a folded grouped output of four rows shows all four and one of five hides two (Claude Code never hides a single row); fails_when=a lone hidden row is replaced by a '+1 line' hint or the hint count is off; why_new=the fold tests use ten lines only; seam=none; no_claim=wrapped lines (each line is short)
+test('a grouped output of four lines shows all four with no hint, and one of five shows three with +2 lines', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-b1', ['four-b1', 'five-b1'], false))
+  const linesOf = (count: number) => `${Array.from({ length: count }, (_, n) => `row ${n}`).join('\n')}\n`
+
+  // Act
+  const four = await $.ui.mount(rowWithResult('four-b1', 'cat four.txt', stdoutOf(linesOf(4))))
+  const five = await $.ui.mount(rowWithResult('five-b1', 'cat five.txt', stdoutOf(linesOf(5))))
+  for (const handle of [four, five]) {
+    await handle.redraw()
+    await handle.redraw()
+  }
+
+  // Assert
+  const fourTexts = (await textsOf(four)).map(t => t.text)
+  const fiveTexts = (await textsOf(five)).map(t => t.text)
+  expect(fourTexts).toContain('row 3')
+  expect(fourTexts.some(text => text.includes('ctrl+o to expand'))).toBe(false)
+  expect(fiveTexts).toContain('row 2')
+  expect(fiveTexts).not.toContain('row 3')
+  expect(fiveTexts).toContain('… +2 lines (ctrl+o to expand)')
+  for (const handle of [five, four, collapsed]) await handle.unmount()
+})
+
+// Value: protects=an interrupted grouped call or one with a blank command is drawn whole by Claude Code; fails_when=the mod draws its own row for an interrupt or an empty command; why_new=the fallback test covers notice, no output and error only; seam=none; no_claim=what Claude Code draws for them (the stand-in draws one Text)
+test('a grouped call that was interrupted, or whose command is blank, is drawn whole by Claude Code', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-b2', ['stopped-b2', 'blank-b2'], false))
+  const stopped = rowWithResult('stopped-b2', 'sleep 600', undefined)
+
+  // Act
+  const interrupted = await $.ui.mount({ ...stopped, props: { ...stopped.props, isInterrupted: true } })
+  const blank = await $.ui.mount(rowWithResult('blank-b2', '  \n ', stdoutOf('# Blank\n')))
+  for (const handle of [interrupted, blank]) await handle.redraw()
+
+  // Assert
+  expect((await textsOf(interrupted)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await textsOf(blank)).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  for (const handle of [blank, interrupted, collapsed]) await handle.unmount()
+})
+
+// Value: protects=a grouped call's output keeps every line past the colouring cap in a full view; fails_when=lines past 2,000 are dropped or the row falls back to Claude Code; why_new=the cap is only tested for standalone result blocks; seam=none; no_claim=colours of a tall row (kept plain by design, see the tall-row test) and the engine's real node bound
+test('a grouped output of 2,001 lines in a group Claude Code expanded shows its first and its last line', async ($, on) => {
+  // Arrange: one line past the colouring cap
+  standInForClaudeCode(on)
+  const expanded = await $.ui.mount(group('group-b3', ['capped-b3'], true))
+  const stdout = `${Array.from({ length: 2001 }, (_, n) => `n${n}`).join('\n')}\n`
+
+  // Act
+  const row = await $.ui.mount(rowWithResult('capped-b3', 'seq 2001', stdoutOf(stdout)))
   await row.redraw()
   await row.redraw()
 
   // Assert
-  expect(beforeGroup).not.toContain('# Early')
-  expect(seen.invalidations - invalidationsBefore).toBeGreaterThan(0)
-  expect(await textsOf(row)).toContainEqual({ text: '# Early', color: OUTPUT_RED })
+  const texts = (await textsOf(row)).map(t => t.text)
+  expect(texts).not.toContain(CLAUDE_CODE_DRAWS)
+  expect(texts).toContain('n0')
+  expect(texts).toContain('n2000')
   for (const handle of [row, expanded]) await handle.unmount()
+})
+
+// Value: protects=a running grouped call draws its dot as running and a finished one as done; fails_when=the dot colour ignores isRunning; why_new=the long-command test checks lines, not the dot; seam=none; no_claim=the theme colour values (the kit resolves names)
+test('a grouped row shows an inactive dot while its command runs and a success dot once it is done', async ($, on) => {
+  // Arrange
+  standInForClaudeCode(on)
+  const collapsed = await $.ui.mount(group('group-b4', ['dot-b4'], false))
+  const asRunning = rowWithResult('dot-b4', 'sleep 2', undefined, MAIN_SCREEN, { isRunning: true })
+  const row = await $.ui.mount(asRunning)
+  await row.redraw()
+  const whileRunning = await textsOf(row)
+
+  // Act
+  await row.redraw({ ...asRunning.props, isRunning: false, output: stdoutOf('done\n') })
+  await row.redraw({ ...asRunning.props, isRunning: false, output: stdoutOf('done\n') })
+  const whenDone = await textsOf(row)
+
+  // Assert
+  expect(whileRunning).toContainEqual({ text: '⏺ ', color: 'inactive' })
+  expect(whenDone).toContainEqual({ text: '⏺ ', color: 'success' })
+  for (const handle of [row, collapsed]) await handle.unmount()
+})
+
+// Value: protects=tall grouped rows kept plain do not send their commands to workers again once the colour cache pushed them out; fails_when=a redraw of more such rows than the cache holds starts a worker, whose answer redraws and starts the next; why_new=the existing cache tests draw standalone rows; seam=none; no_claim=real worker timing and the real cache pressure of a long session
+test('more tall grouped rows kept plain than the colour cache holds start no further workers when drawn again', { timeoutMs: 120_000 }, async ($, on) => {
+  // Arrange: 205 grouped rows, each with its own command and a 40-line result, drawn on a 24-row main screen while every
+  // worker is held, so each row is kept plain; then the workers answer (205 commands and 205 results)
+  const commandsSent: string[] = []
+  let release: () => void = () => {}
+  const held = new Promise<void>(resolve => (release = resolve))
+  let finished = 0
+  let allFinished: () => void = () => {}
+  const everyFirstColouringFinished = new Promise<void>(resolve => (allFinished = resolve))
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    if (asked.output === undefined) commandsSent.push(String(asked.command ?? ''))
+    await held
+    if (++finished === 410) allFinished()
+    const lines = String(asked.output ?? asked.command ?? '').split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const shortScreen = { columns: 80, rows: 24, isFullscreen: false }
+  const ids = Array.from({ length: 205 }, (_, n) => `kept-plain-${n}`)
+  const expanded = await $.ui.mount(group('group-kept-plain', ids, true, shortScreen))
+  const fortyLines = stdoutOf(`${Array.from({ length: 40 }, (_, n) => `- item ${n}`).join('\n')}\n`)
+  const rows: Array<{ redraw: () => Promise<void>; unmount: () => Promise<void> }> = []
+  for (const [n, id] of ids.entries()) rows.push(await $.ui.mount(rowWithResult(id, `cat tall-${n}.md`, fortyLines, shortScreen)))
+  release()
+  await everyFirstColouringFinished
+  // drawn twice more: a command pushed out of the cache before its row saw its colours is coloured once more, and settles
+  for (const row of rows) await row.redraw()
+  for (const row of rows) await row.redraw()
+  const sentBefore = commandsSent.length
+
+  // Act: every row is drawn again, as a resize or a scroll back draws it
+  for (const row of rows) await row.redraw()
+
+  // Assert
+  expect(commandsSent.length - sentBefore).toBe(0)
+  for (const handle of [...rows, expanded]) await handle.unmount()
+})
+
+// Value: protects=a folded grouped row whose one long output line wraps to four rows is measured by the rows it shows; fails_when=the height check counts the line as one row and restyles a row the main screen cannot redraw whole; why_new=the tall-row test uses an unfolded group; seam=none; no_claim=what a real screen keeps in its scrollback
+test('a folded grouped row that only fits the main screen when its wrapped output is counted as one line stays plain once its colours are back', async ($, on) => {
+  // Arrange: workers held; a mod-unfolded group on a 15-row main screen; one 275-character line, four rows at 70 cells:
+  // 8 prompt rows, 3 for the blank line and hints, 1 command row and 4 output rows pass the 15 rows of the screen
+  const held: Array<() => void> = []
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', async (_, e) => {
+    const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    await new Promise<void>(resolve => held.push(resolve))
+    const lines = String(asked.output ?? asked.command ?? '').split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('clock.sleep', () => ({ value: undefined }))
+  const tinyScreen = { columns: 80, rows: 15, isFullscreen: false }
+  const collapsed = await $.ui.mount(group('group-wrapped', ['wrapped-1'], false, tinyScreen))
+  const row = await $.ui.mount(rowWithResult('wrapped-1', 'cat wide.txt', stdoutOf(`${'x'.repeat(275)}\n`), tinyScreen))
+
+  // Act: both workers answer and the row is drawn again
+  while (held.length > 0) held.shift()?.()
+  await row.redraw()
+  await row.redraw()
+
+  // Assert: the first of the four wrapped rows is drawn, and not in the worker's colour
+  const texts = await textsOf(row)
+  expect(texts.map(t => t.text)).toContain('x'.repeat(70))
+  expect(texts).not.toContainEqual({ text: 'x'.repeat(70), color: OUTPUT_RED })
+  for (const handle of [row, collapsed]) await handle.unmount()
 })
