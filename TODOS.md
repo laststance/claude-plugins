@@ -50,6 +50,8 @@
 **Priority:** P3
 **Depends on:** syntax-highlight 0.1.1
 
+## Completed
+
 ### Hand back expanded blocks past 100,000 characters
 
 **What:** Before drawing an expanded Output block, total the characters of its drawn text and hand the block to Claude Code past about 95,000, as is done past the node bound.
@@ -62,4 +64,4 @@
 **Priority:** P3
 **Depends on:** syntax-highlight 0.1.1
 
-## Completed
+**Completed:** v0.1.2 (2026-11-28)

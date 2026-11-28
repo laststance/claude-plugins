@@ -44,6 +44,10 @@ const MAX_WORKERS = 4
 // ClientElements), and the rest of this one (the ⎿, the fold, the sibling rows) takes a few more. An expanded block
 // past it (some 5,000 short lines, or fewer with many colours each) is drawn by Claude Code
 const MAX_DRAWN_NODES = 15_000
+// The characters of text an Output block's rows may show in one drawn tree. The engine draws the first 100,000 and cuts
+// the rest with no mark, and the rest of the tree (the ⎿, the fold) shows a few more. An expanded block past it (with
+// BASH_MAX_OUTPUT_LENGTH raised) is drawn by Claude Code, whole
+const MAX_DRAWN_CHARACTERS = 95_000
 // The rows Claude Code keeps on the main screen below the transcript: the prompt box, its hints and the status line
 const PROMPT_ROWS = 8
 // characters a drawn Text refuses: the C0 controls but tab, newline and carriage return, DEL and C1 (an ANSI colour's
@@ -464,6 +468,19 @@ const scopeOf = (kind: string, id: string) => `syntax-highlight:${kind}${id.slic
 const drawnNodes = (rows: Run[][]) => rows.reduce((sum, runs) => sum + 1 + 2 * Math.max(runs.length, 1), 0)
 
 /**
+ * How many characters of text an Output block's rows show in a drawn tree, counted as the engine counts its 100,000.
+ *
+ * The `ToolResult` hook checks it against {@link MAX_DRAWN_CHARACTERS} before drawing: past it, the engine would cut the
+ * block's end with no mark, where Claude Code draws it whole.
+ *
+ * @param rows - The rows to be drawn, each a list of runs.
+ * @returns the characters the rows show
+ * @example
+ * drawnCharacters([[{ t: 'abc', fg: null, b: false, i: false, u: false }], []]) // => 3
+ */
+const drawnCharacters = (rows: Run[][]) => rows.reduce((sum, runs) => sum + runs.reduce((n, run) => n + run.t.length, 0), 0)
+
+/**
  * Draws runs as Text: a coloured run pulled toward grey by `strength`, brightened while hovered.
  *
  * @param Text - The surface's Text element.
@@ -579,8 +596,8 @@ export const register: Register = (on, userOptions) => {
     // collapsed, the block folds as Claude Code folds it; expanded (ctrl+o, verbose), every line is drawn
     const width = Math.max((e.viewport?.columns ?? 80) - FOLD_INDENT, 10)
     const { rows, hidden } = isExpanded ? { rows: lines, hidden: 0 } : foldRows(lines, width)
-    // a tree past the engine's bound on nodes is refused: Claude Code draws the block instead
-    if (drawnNodes(rows) > MAX_DRAWN_NODES) return next(e)
+    // a tree past the engine's bound on nodes is refused, and one past its characters is cut: Claude Code draws the block
+    if (drawnNodes(rows) > MAX_DRAWN_NODES || drawnCharacters(rows) > MAX_DRAWN_CHARACTERS) return next(e)
     const block = (
       <Box flexDirection="row">
         <Text dimColor>{'  ⎿  '}</Text>

@@ -432,7 +432,9 @@ test('a result with a long run of spaces inside a line is drawn coloured at once
 
   // Act
   const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-26' } as never)
-  const block = await $.ui.mount(outputBlock('call-26', (done as { result?: Record<string, unknown> }).result ?? {}))
+  // collapsed, as a block is first drawn: expanded, a line this long is more than one drawing shows, and Claude Code
+  // draws the block (the 100,000-character test)
+  const block = await $.ui.mount(outputBlock('call-26', (done as { result?: Record<string, unknown> }).result ?? {}, false))
   await block.redraw()
 
   // Assert: the heading is the mod's coloured row; the over-long line follows it as it is
@@ -578,6 +580,23 @@ test('a theme colour written in short hex (#fff, as some themes write it) is dra
   for (const handle of [block, row]) await handle.unmount()
 })
 
+test('an expanded block with more text than one drawing shows (100,000 characters), and a cwd notice, is drawn by Claude Code whole, its stdout kept', async ($, on) => {
+  // Arrange: 100 lines of 1,000 characters, few nodes but past the 100,000 characters the engine draws in one tree
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-55', 'cd /tmp/data; cat data.md'))
+  const stdout = `${Array.from({ length: 100 }, (_, n) => `${String(n).padStart(4, '0')} ${'x'.repeat(995)}`).join('\n')}\n`
+  const output = { stdout, stderr: CWD_NOTICE, interrupted: false, isImage: false }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-55', output, true))
+  await block.redraw()
+
+  // Assert: Claude Code draws the record as it is, so no end of it is cut
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect(seen.drawnByClaudeCode.at(-1)).toEqual(output)
+  for (const handle of [block, row]) await handle.unmount()
+})
+
 test('a diff -u that exits 1 because the files differ has its diff coloured', async ($, on) => {
   // Arrange: Claude Code explains the exit code, which it shows only for an empty stdout
   standInForClaudeCode(on)
@@ -714,9 +733,13 @@ test('more distinct command rows than the colour cache holds, drawn again while 
 })
 
 test('an Output block drawn in two versions sends each to a worker once while 200 other blocks are coloured', { timeoutMs: 120_000 }, async ($, on) => {
-  // Arrange: the two versions' workers are held; every other block is answered at once
+  // Arrange: the two versions' workers are held; every other block is answered at once, and the test is told when the
+  // 200 other blocks have been
   const started: string[] = []
   const held: Array<() => void> = []
+  let otherBlocksDone: () => void = () => {}
+  const everyOtherBlockDone = new Promise<void>(resolve => (otherBlocksDone = resolve))
+  let otherBlocks = 0
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -727,6 +750,7 @@ test('an Output block drawn in two versions sends each to a worker once while 20
     const text = String(asked.output ?? asked.command ?? '')
     started.push(text)
     if (text.startsWith('# Version')) await new Promise<void>(resolve => held.push(resolve))
+    if (text.startsWith('# Other') && ++otherBlocks === 200) otherBlocksDone()
     const lines = text.split('\n').map(t => (t === '' ? [] : [{ t, fg: '#ff0000', b: false, i: false, u: false }]))
 
     return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -740,7 +764,7 @@ test('an Output block drawn in two versions sends each to a worker once while 20
     handles.push(await $.ui.mount(commandRow(`call-other-${n}`, `cat other-${n}.md`)))
     handles.push(await $.ui.mount(outputBlock(`call-other-${n}`, { stdout: `# Other ${n}\n`, stderr: '', interrupted: false, isImage: false })))
   }
-  await new Promise(resolve => setTimeout(() => resolve(undefined), 1000))
+  await everyOtherBlockDone
 
   // Act: the first version's worker finishes, and the second version, still waiting, is drawn again
   held.shift()?.()
@@ -754,9 +778,12 @@ test('an Output block drawn in two versions sends each to a worker once while 20
 })
 
 test('a row drawn while every colouring worker is busy is coloured before rows that waited longer', { timeoutMs: 30_000 }, async ($, on) => {
-  // Arrange: a worker held until the test lets it go, recording the commands in the order it starts them
+  // Arrange: a worker held until the test lets it go, recording the commands in the order it starts them and telling
+  // the test when the next one starts
   const started: string[] = []
   const held: Array<() => void> = []
+  let onStart: () => void = () => {}
+  const nextWorkerStarts = () => new Promise<void>(resolve => (onStart = resolve))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -765,6 +792,7 @@ test('a row drawn while every colouring worker is busy is coloured before rows t
   on('process.run', async (_, e) => {
     const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
     started.push(String(asked.command ?? ''))
+    onStart()
     await new Promise<void>(resolve => held.push(resolve))
     const lines = [[{ t: String(asked.command ?? ''), fg: '#ff0000', b: false, i: false, u: false }]]
 
@@ -774,11 +802,14 @@ test('a row drawn while every colouring worker is busy is coloured before rows t
 
   for (let n = 1; n <= 6; n++) rows.push(await $.ui.mount(commandRow(`call-queue-${n}`, `cat queue-${n}.md`)))
 
-  // Act: with all six rows drawn (four running, two waiting in line), the workers finish one at a time
-  while (held.length > 0) {
-    held.shift()?.()
-    await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
-  }
+  // Act: with all six rows drawn (four running, two waiting in line), one worker finishes, then another
+  const firstFromLine = nextWorkerStarts()
+  held.shift()?.()
+  await firstFromLine
+  const secondFromLine = nextWorkerStarts()
+  held.shift()?.()
+  await secondFromLine
+  while (held.length > 0) held.shift()?.()
 
   // Assert: the sixth started before the fifth
   expect(started).toEqual(['cat queue-1.md', 'cat queue-2.md', 'cat queue-3.md', 'cat queue-4.md', 'cat queue-6.md', 'cat queue-5.md'])

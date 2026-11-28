@@ -25,7 +25,8 @@ after(() => fs.rmSync(HOME_FOR_WORKER, { recursive: true, force: true }))
 const colourOutput = (output, command) => {
   // a home of its own, so the worker neither reads this machine's user grammars nor writes its runners file there
   const env = { ...process.env, HOME: HOME_FOR_WORKER, SYNTAX_HIGHLIGHT_RUNNERS: path.join(path.dirname(WORKER), 'runners.json') }
-  const done = spawnSync('node', [WORKER], { input: JSON.stringify({ output, command, theme: 'dark-plus' }), encoding: 'utf8', timeout: 20000, env })
+  // the Node that runs this suite, which need not be the `node` on the PATH
+  const done = spawnSync(process.execPath, [WORKER], { input: JSON.stringify({ output, command, theme: 'dark-plus' }), encoding: 'utf8', timeout: 20000, env })
   assert.equal(done.status, 0, done.stderr)
   return JSON.parse(done.stdout).lines
 }
