@@ -518,13 +518,17 @@ test('a file printed after Markdown piped through a numbered grep takes its own 
 
   // Act
   const prefixed = planOutput('cat notes.md | grep -Hn --label=notes.md TODO; cat app.ts', output)
-  const throughHead = planOutput('cat notes.md | grep -n TODO | head -n 3; cat app.ts', output)
+  const throughHead = planOutput('cat notes.md | grep -Hn --label=notes.md TODO | head -n 3; cat app.ts', output)
+  const bareNumbers = planOutput('cat notes.md | grep -n TODO; cat app.ts', output)
   const unprefixed = planOutput('cat notes.md | grep -v draft; cat app.ts', output)
   const ownFile = planOutput('cat notes.md | grep -n TODO | cat app.ts; cat guide.md', output)
 
-  // Assert: a filter without prefixes still prints Markdown, and a last stage reading its own file prints that file
+  // Assert: a filter without prefixes still prints Markdown, and a last stage reading its own file prints that file.
+  // Rows under a bare `2:` cannot be told from TypeScript lines, so that block has no Language and `2:/* TODO` opens
+  // no comment over app.ts
   expect(prefixed.language).toBe('ts')
   expect(throughHead.language).toBe('ts')
+  expect(bareNumbers.language).toBe(null)
   expect(unprefixed.language).toBe(null)
   expect(ownFile.language).toBe(null)
 })
@@ -537,11 +541,13 @@ test('a here-string after a < file is what cat reads, so the block takes no Lang
   const hereStringLast = planOutput("cat < guide.md <<< 'plain text'", output)
   const fileLast = planOutput("cat <<< 'plain text' < guide.md", output)
   const stdoutAfter = planOutput('cat < guide.md 2> errors.log', output)
+  const otherDescriptor = planOutput("cat < guide.md 3<<< 'other text'", output)
 
   // Assert
   expect(hereStringLast.language).toBe(null)
   expect(fileLast.language).toBe('md')
   expect(stdoutAfter.language).toBe('md')
+  expect(otherDescriptor.language).toBe('md')
 })
 
 test('a label given to stdin without -H names no file, as grep does not print it', () => {

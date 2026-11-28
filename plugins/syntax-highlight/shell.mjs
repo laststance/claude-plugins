@@ -38,6 +38,8 @@ export const lex = src => {
         endSegment('\n')
       } else if (/<<<$|<<-?$/.test(o.replace(/\d+/g, '').replace(/&.*/, ''))) {
         next = o.includes('<<<') ? 'herestring' : (o.includes('-') ? 'heretagStrip' : 'heretag')
+        // a heredoc or here-string feeds stdin unless it names another descriptor (`3<<< text`)
+        isStdin = /^0?</.test(o)
       } else if (/[<>]/.test(o)) {
         next = /&\d*-?$/.test(o) ? null : 'redir'
         // `< file` (or `0< file`) feeds the segment's stdin: the word after it is kept as seg.stdin too
@@ -92,10 +94,12 @@ export const lex = src => {
     if (next === 'heretag' || next === 'heretagStrip') {
       const h = { tag: value, strip: next === 'heretagStrip', body: null }
       pending.push(h); seg.heredocs.push(h)
-      seg.stdin = { ...word, value: '' }
+      if (isStdin) seg.stdin = { ...word, value: '' }
+      isStdin = false
     } else if (next === 'herestring') {
       seg.herestring = word
-      seg.stdin = { ...word, value: '' }
+      if (isStdin) seg.stdin = { ...word, value: '' }
+      isStdin = false
     } else if (next === 'redir') {
       seg.redirs.push(word)
       if (isStdin) seg.stdin = word

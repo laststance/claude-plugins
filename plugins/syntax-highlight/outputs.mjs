@@ -281,14 +281,21 @@ const passesStdin = (seg, program) => {
  * @param program - The stage's program, from programOf.
  * @param fed - The Language the stage before it printed, or null.
  * @param isPrefixed - Whether the rows fed to the stage carry a grep's prefixes.
- * @returns `{ fed, isPrefixed }` for the stage's own output
+ * @param isHits - Whether those prefixes are a file name and a line number (`path:12:`).
+ * @returns `{ fed, isPrefixed, isHits }` for the stage's own output
  * @example
- * feedStage(lex('grep -Hn TODO')[0], { name: 'grep', args: ['-Hn', 'TODO'] }, 'ts', false) // => { fed: 'ts', isPrefixed: true }
+ * feedStage(lex('grep -Hn TODO')[0], { name: 'grep', args: ['-Hn', 'TODO'] }, 'ts', false) // => { fed: 'ts', isPrefixed: true, isHits: true }
  */
-const feedStage = (seg, program, fed, isPrefixed) => ({
-  fed: languageOf(program, stdinOf(seg, fed)),
-  isPrefixed: (isPrefixed && passesStdin(seg, program)) || (namesOf(program).some(name => GREP_PROGRAMS.has(name)) && prefixesRows(program)),
-})
+const feedStage = (seg, program, fed, isPrefixed, isHits = false) => {
+  const isGrep = namesOf(program).some(name => GREP_PROGRAMS.has(name))
+  const passes = passesStdin(seg, program)
+  return {
+    fed: languageOf(program, stdinOf(seg, fed)),
+    isPrefixed: (isPrefixed && passes) || (isGrep && prefixesRows(program)),
+    // rows of `path:12:`, which a block with a Language tells from the Language's lines; a bare `12:` it cannot
+    isHits: (isHits && passes) || (isGrep && writesHits(program)),
+  }
+}
 
 /**
  * The Language a pipeline stage prints, given what fed it.
@@ -364,6 +371,7 @@ export const planOutput = (command, output) => {
   const grepped = []
   let fed = null
   let isPrefixed = false
+  let isHits = false
   for (const seg of segments) {
     const program = programOf(seg)
     const isPiped = seg.op === '|' || seg.op === '|&'
@@ -379,14 +387,16 @@ export const planOutput = (command, output) => {
       // a grep's hits name its files, and the strong form takes no name with a space or without a `.` or `/`
       // (`Makefile`): those the command gave it are known. `-` is stdin, which has no name of its own
       if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => arg !== '' && arg !== '-'), ...labelOf(program))
-      ;({ fed, isPrefixed } = feedStage(seg, program, fed, isPrefixed))
+      ;({ fed, isPrefixed, isHits } = feedStage(seg, program, fed, isPrefixed, isHits))
     }
-    // the last stage of a pipeline prints; a silent command prints nothing, and rows under a grep's prefixes are the
-    // grep shape's, not a print of the Language
+    // the last stage of a pipeline prints; a silent command prints nothing, and rows of `path:12:` are the grep
+    // shape's, not a print of the Language. Rows under a bare `12:` stay one: a block with a Language cannot tell them
+    // from its lines, so with a file of another Language after them the block has none and every row is tested
     if (!isPiped) {
-      if (program !== null && !SILENT.has(program.name)) printed.add(isPrefixed ? null : fed)
+      if (program !== null && !SILENT.has(program.name)) printed.add(isHits ? null : fed)
       fed = null
       isPrefixed = false
+      isHits = false
     }
   }
 
@@ -714,6 +724,23 @@ const isHitOf = (line, grepped) => {
     if ((/\s/.test(name) ? /^[:-]\d+[:-]/ : /^:\d+:/).test(rest) || /^\/[^:\n]*[:-]\d+[:-]/.test(rest)) return true
   }
   return false
+}
+
+/**
+ * Whether a grep writes both a file name and a line number before each row (`grep -Hn`, `rg --vimgrep`): rows of
+ * `path:12:`, the form a block with a Language still tells from its lines. Called by {@link feedStage}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns true when the flags ask for both
+ * @example
+ * writesHits({ name: 'grep', args: ['-Hn', 'TODO'] }) // => true
+ * writesHits({ name: 'grep', args: ['-n', 'TODO'] }) // => false
+ */
+const writesHits = program => {
+  const { flags } = grepArgs(program)
+  if (flags.has('--vimgrep')) return true
+  const isNamed = ['-H', '--with-filename', '--filename'].some(flag => flags.has(flag))
+  return isNamed && ['-n', '--line-number', '--numbers'].some(flag => flags.has(flag))
 }
 
 /**
