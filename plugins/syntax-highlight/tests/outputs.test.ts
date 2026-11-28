@@ -498,6 +498,52 @@ test('a grep row under the label given to stdin with -H (release notes.ts:3:) ke
   expect(scopes).toEqual([BLOCK, 'text.output.grep', BLOCK])
 })
 
+test('a label names no file when the grep reads a file of its own, so a guide line opening with the label stays Markdown', () => {
+  // Arrange: grep reads only src/a.ts, and the label is for stdin
+  const command = 'grep -Hn --label="release notes.md" TODO src/a.ts; cat guide.md'
+  const lines = ['src/a.ts:3:// TODO', 'release notes.md:3: is where the notes start']
+
+  // Act
+  const plan = planOutput(command, lines.join('\n'))
+  const scopes = assignLines(lines, plan)
+
+  // Assert
+  expect(plan.grepped).toEqual(['src/a.ts'])
+  expect(scopes).toEqual(['text.output.grep', BLOCK])
+})
+
+test('a file printed after Markdown piped through a numbered grep takes its own Language (TypeScript), as the grep rows are no Markdown print', () => {
+  // Arrange
+  const output = 'notes.md:3:TODO\nconst a = 1'
+
+  // Act
+  const prefixed = planOutput('cat notes.md | grep -Hn --label=notes.md TODO; cat app.ts', output)
+  const throughHead = planOutput('cat notes.md | grep -n TODO | head -n 3; cat app.ts', output)
+  const unprefixed = planOutput('cat notes.md | grep -v draft; cat app.ts', output)
+  const ownFile = planOutput('cat notes.md | grep -n TODO | cat app.ts; cat guide.md', output)
+
+  // Assert: a filter without prefixes still prints Markdown, and a last stage reading its own file prints that file
+  expect(prefixed.language).toBe('ts')
+  expect(throughHead.language).toBe('ts')
+  expect(unprefixed.language).toBe(null)
+  expect(ownFile.language).toBe(null)
+})
+
+test('a here-string after a < file is what cat reads, so the block takes no Language from the file', () => {
+  // Arrange: the shell applies redirections left to right, and the last one of stdin wins
+  const output = 'plain text'
+
+  // Act
+  const hereStringLast = planOutput("cat < guide.md <<< 'plain text'", output)
+  const fileLast = planOutput("cat <<< 'plain text' < guide.md", output)
+  const stdoutAfter = planOutput('cat < guide.md 2> errors.log', output)
+
+  // Assert
+  expect(hereStringLast.language).toBe(null)
+  expect(fileLast.language).toBe('md')
+  expect(stdoutAfter.language).toBe('md')
+})
+
 test('a label given to stdin without -H names no file, as grep does not print it', () => {
   // Arrange
   const command = 'cat intro.md; cat draft.md | grep --label="release notes.md" -v draft; cat guide.md'
@@ -577,9 +623,11 @@ test('a Markdown line that opens with the git grep pattern stays Markdown when a
 
   for (const command of commands) {
     // Act
-    const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+    const plan = planOutput(command, lines.join('\n'))
+    const scopes = assignLines(lines, plan)
 
-    // Assert
+    // Assert: the grep is found past git's own flags, with its file and not its pattern
+    expect({ command, grepped: plan.grepped }).toEqual({ command, grepped: ['src/a.ts'] })
     expect({ command, scopes }).toEqual({ command, scopes: [BLOCK, BLOCK] })
   }
 })

@@ -87,11 +87,16 @@ export const lex = src => {
       } else { push(ch, i); i++ }
     }
     const word = { start, end: Math.min(i, src.length), value, map }
+    // seg.stdin is what the last redirection of stdin reads, as the shell applies them left to right: the file after
+    // `<`, or a word with no name for a heredoc or a here-string, whose text has no file
     if (next === 'heretag' || next === 'heretagStrip') {
       const h = { tag: value, strip: next === 'heretagStrip', body: null }
       pending.push(h); seg.heredocs.push(h)
-    } else if (next === 'herestring') seg.herestring = word
-    else if (next === 'redir') {
+      seg.stdin = { ...word, value: '' }
+    } else if (next === 'herestring') {
+      seg.herestring = word
+      seg.stdin = { ...word, value: '' }
+    } else if (next === 'redir') {
       seg.redirs.push(word)
       if (isStdin) seg.stdin = word
       isStdin = false

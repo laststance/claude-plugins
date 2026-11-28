@@ -211,6 +211,18 @@ test('Markdown piped through a grep that writes no prefix, between two other fil
   assert.equal(why.b, true)
 })
 
+test('a file cut inside a block comment does not turn a file that the last stage of a numbered grep pipeline reads itself into a comment', () => {
+  // Arrange: `cat app.ts` at the end of the pipeline prints app.ts, not the grep rows piped into it
+  const output = ['/* licence', 'hits.ts:3:// TODO', 'const version = 1;'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'head -n 1 intro.ts; grep -Hn TODO hits.ts; cat source.ts | grep -Hn TODO | cat app.ts')
+
+  // Assert: app.ts is TypeScript, and the comment stays the first file's
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['const', '#569cd6'], [' ', null], ['version', '#4fc1ff'], [' = ', null], ['1', '#b5cea8'], [';', null]])
+  assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['/* licence', '#6a9955']])
+})
+
 test('Markdown piped through a grep with two -e patterns keeps a fenced example holding a grep hit whole', () => {
   // Arrange: the values of -e are patterns, not files, so the grep filters the Markdown piped in
   const output = ['# Guide', '', '```sh', 'src/a.ts:12:const a = 1', '```', '', '**Why:** bold here'].join('\n')

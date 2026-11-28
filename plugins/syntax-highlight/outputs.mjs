@@ -238,7 +238,8 @@ const namesOf = program => {
 
 /**
  * The Language of a segment's stdin: the file a `<` reads (`cat - guide.md < intro.md`), which the shell gives the
- * program in place of the pipe, else what the stage before it printed. Called by {@link planOutput} and
+ * program in place of the pipe (a heredoc or a here-string is text with no Language), else what the stage before it
+ * printed. Called by {@link planOutput} and
  * {@link readsApart} before {@link languageOf}.
  *
  * @param seg - One segment from lex.
@@ -248,6 +249,46 @@ const namesOf = program => {
  * stdinOf(lex('cat < intro.md')[0], null) // => 'md'
  */
 const stdinOf = (seg, fed) => (seg.stdin ? extensionOf(seg.stdin.value) : fed)
+
+/**
+ * Whether a pipeline stage prints the lines of its stdin: a viewer or a filter given no file of its own, and no `<`,
+ * heredoc or here-string in place of the pipe. A stage that reads its own file instead (`... | cat app.ts`) prints
+ * nothing of what the stages before it wrote. Called by {@link feedStage}.
+ *
+ * @param seg - The stage's segment, from lex.
+ * @param program - The stage's program, from programOf.
+ * @returns true when the pipe's lines come out of the stage
+ * @example
+ * passesStdin(lex('head -n 3')[0], { name: 'head', args: ['-n', '3'] }) // => true
+ * passesStdin(lex('cat app.ts')[0], { name: 'cat', args: ['app.ts'] }) // => false
+ */
+const passesStdin = (seg, program) => {
+  const { name, args } = program
+  if (seg.stdin) return false
+  if (VIEWERS.has(name)) return fileArgs(args).length === 0 || args.includes('-')
+  if (namesOf(program).some(known => GREP_PROGRAMS.has(known))) return searchedOf(program).every(word => word === '-')
+  if (name === 'sed' && args.includes('-n')) return args.filter(a => !a.startsWith('-')).length <= 1
+  return FILTERS.has(name) && fileArgs(args).length <= 1
+}
+
+/**
+ * Moves the state of a pipeline one stage on: the Language the stage prints, and whether its rows carry a grep's
+ * prefixes (`cat a.ts | grep -Hn TODO | head`), which makes them the `grep` shape's rows, not lines of the Language.
+ * The prefixes last through stages that pass their stdin on and end at one that reads its own file. Called by
+ * {@link planOutput} and {@link readsApart}, so both read a pipeline the same way.
+ *
+ * @param seg - The stage's segment, from lex.
+ * @param program - The stage's program, from programOf.
+ * @param fed - The Language the stage before it printed, or null.
+ * @param isPrefixed - Whether the rows fed to the stage carry a grep's prefixes.
+ * @returns `{ fed, isPrefixed }` for the stage's own output
+ * @example
+ * feedStage(lex('grep -Hn TODO')[0], { name: 'grep', args: ['-Hn', 'TODO'] }, 'ts', false) // => { fed: 'ts', isPrefixed: true }
+ */
+const feedStage = (seg, program, fed, isPrefixed) => ({
+  fed: languageOf(program, stdinOf(seg, fed)),
+  isPrefixed: (isPrefixed && passesStdin(seg, program)) || (namesOf(program).some(name => GREP_PROGRAMS.has(name)) && prefixesRows(program)),
+})
 
 /**
  * The Language a pipeline stage prints, given what fed it.
@@ -322,6 +363,7 @@ export const planOutput = (command, output) => {
   const columns = []
   const grepped = []
   let fed = null
+  let isPrefixed = false
   for (const seg of segments) {
     const program = programOf(seg)
     const isPiped = seg.op === '|' || seg.op === '|&'
@@ -330,18 +372,21 @@ export const planOutput = (command, output) => {
       // every word of wc's that is no flag and no flag's value is a file it counts
       if (program.name === 'wc') {
         const files = operandsOf(program.args, WC_VALUE_FLAGS)
+        const perRow = wcColumns(program.args)
         counted.push(...files)
-        columns.push(...files.map(() => wcColumns(program.args)))
+        columns.push(...files.map(() => perRow))
       }
       // a grep's hits name its files, and the strong form takes no name with a space or without a `.` or `/`
       // (`Makefile`): those the command gave it are known. `-` is stdin, which has no name of its own
       if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => arg !== '' && arg !== '-'), ...labelOf(program))
-      fed = languageOf(program, stdinOf(seg, fed))
+      ;({ fed, isPrefixed } = feedStage(seg, program, fed, isPrefixed))
     }
-    // the last stage of a pipeline prints; a silent command prints nothing
+    // the last stage of a pipeline prints; a silent command prints nothing, and rows under a grep's prefixes are the
+    // grep shape's, not a print of the Language
     if (!isPiped) {
-      if (program !== null && !SILENT.has(program.name)) printed.add(fed)
+      if (program !== null && !SILENT.has(program.name)) printed.add(isPrefixed ? null : fed)
       fed = null
+      isPrefixed = false
     }
   }
 
@@ -381,10 +426,8 @@ export const readsApart = command => {
   for (const seg of segments) {
     const program = programOf(seg)
     if (program !== null) {
-      fed = languageOf(program, stdinOf(seg, fed))
+      ;({ fed, isPrefixed } = feedStage(seg, program, fed, isPrefixed))
       names.push(...namesOf(program))
-      // a grep anywhere in the pipeline that writes a prefix before each row makes the pipeline's rows the grep shape's
-      if (namesOf(program).some(name => GREP_PROGRAMS.has(name)) && prefixesRows(program)) isPrefixed = true
     }
     // only the last stage of a pipeline prints
     if (seg.op === '|' || seg.op === '|&') continue
@@ -612,18 +655,22 @@ const searchedOf = program => {
 }
 
 /**
- * The name a grep prints before the rows it read from stdin: the value of `--label`, shown only with -H. Its rows then
- * name it as a searched file's rows name the file (`release notes.ts:3:`). Called by {@link planOutput}.
+ * The name a grep prints before the rows it read from stdin: the value of `--label`, shown only with -H, and only when
+ * the grep reads stdin (no file given, or `-` among them). Its rows then name it as a searched file's rows name the
+ * file (`release notes.ts:3:`). Called by {@link planOutput}.
  *
  * @param program - A grep, rg, ag or git grep program, from programOf.
  * @returns the label in a list, or an empty list when the grep prints none
  * @example
  * labelOf({ name: 'grep', args: ['-Hn', '--label=release notes.ts', 'TODO'] }) // => ['release notes.ts']
  * labelOf({ name: 'grep', args: ['--label=draft.md', '-v', 'draft'] }) // => []
+ * labelOf({ name: 'grep', args: ['-Hn', '--label=x.md', 'TODO', 'src/a.ts'] }) // => []
  */
 const labelOf = program => {
   const { flags, label } = grepArgs(program)
-  return label !== null && label !== '' && (flags.has('-H') || flags.has('--with-filename')) ? [label] : []
+  const files = searchedOf(program)
+  const readsStdin = files.length === 0 || files.includes('-')
+  return label !== null && label !== '' && readsStdin && (flags.has('-H') || flags.has('--with-filename')) ? [label] : []
 }
 
 /**
