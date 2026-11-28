@@ -210,3 +210,16 @@ test('Markdown piped through a grep that writes no prefix, between two other fil
   assert.equal(why.t, '**Why:**')
   assert.equal(why.b, true)
 })
+
+test('Markdown piped through a grep given only a label for stdin (no -H) keeps a fenced example holding a grep hit whole', () => {
+  // Arrange: grep prints the label only with -H, so its rows are the file's lines as they are
+  const output = ['# Guide', '', '```sh', 'src/a.ts:12:const a = 1', '```', '', '**Why:** bold here'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'cat intro.md; cat draft.md | grep --label=draft.md -v draft; cat guide.md')
+
+  // Assert: `**Why:**` is bold Markdown, not the fence's code
+  const why = lines[6][0]
+  assert.equal(why.t, '**Why:**')
+  assert.equal(why.b, true)
+})

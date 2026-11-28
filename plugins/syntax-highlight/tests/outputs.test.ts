@@ -120,7 +120,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [], grepped: [] })
+    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [], grepped: ['~/.zprofile'] })
     expect(scopes).toEqual([
       null,
       'text.output.grep',
@@ -442,6 +442,34 @@ test('grep hits in a file or folder with a space in its name that the command gr
     // Assert: a bare `12:` row stays Markdown
     expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
   }
+})
+
+test('a grep hit in a file without an extension that the command grepped (Makefile:3:) keeps its colours in a Markdown block', () => {
+  // Arrange: the strong form takes no path without a `.` or `/`; the command names the file
+  const command = 'grep -Hn TODO Makefile; cat guide.md'
+  const lines = ['Makefile:3:TODO tidy', '# Guide', 'Makefile: the build entry']
+
+  // Act
+  const plan = planOutput(command, lines.join('\n'))
+  const scopes = assignLines(lines, plan)
+
+  // Assert: the guide's own line that names the file without a line number stays Markdown
+  expect(plan.grepped).toEqual(['Makefile'])
+  expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
+})
+
+test('a date in a Markdown block (2026-11-28) stays Markdown after a grep of a file named 2026', () => {
+  // Arrange: a context row of the file `2026` would read `2026-11-`, the same as the date
+  const command = 'grep -Hn -e deploy 2026 -; cat guide.md'
+  const lines = ['2026:3:deploy', '2026-11-28 release', '-12- items']
+
+  // Act
+  const plan = planOutput(command, lines.join('\n'))
+  const scopes = assignLines(lines, plan)
+
+  // Assert: stdin (`-`) is no named file
+  expect(plan.grepped).toEqual(['2026'])
+  expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
 })
 
 test('a Markdown line that opens with the grep pattern (release notes:12:) stays Markdown, as the pattern is no file', () => {

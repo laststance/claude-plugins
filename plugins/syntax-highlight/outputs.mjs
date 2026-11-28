@@ -10,7 +10,7 @@ import { lex, programOf } from './shell.mjs'
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
  * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
- * @property {string[]} grepped - The files and folders with a space in their name a grep in the command searches.
+ * @property {string[]} grepped - The files and folders a grep in the command searches, as written (`Makefile`).
  */
 
 // ---------- Output shapes ----------
@@ -311,8 +311,9 @@ export const planOutput = (command, output) => {
       for (const name of namesOf(program)) names.add(name)
       // every word of wc's that is no flag and no flag's value is a file it counts
       if (program.name === 'wc') counted.push(...operandsOf(program.args, WC_VALUE_FLAGS))
-      // a grep's hits name its files, and the strong form takes no name with a space: those the command gave it are known
-      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => /\s/.test(arg)))
+      // a grep's hits name its files, and the strong form takes no name with a space or without a `.` or `/`
+      // (`Makefile`): those the command gave it are known. `-` is stdin, which has no name of its own
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => arg !== '' && arg !== '-'))
       fed = languageOf(program, fed)
     }
     // the last stage of a pipeline prints; a silent command prints nothing
@@ -441,7 +442,8 @@ const GREP_FLAGS = {
       '--binary-files', '--devices', '--directories', '--group-separator', '--max-depth', '--threads', '--parent-basename',
     ],
     patterns: ['-e', '-f', '--regexp', '--file'],
-    prefixes: ['-n', '-H', '-b', '--line-number', '--with-filename', '--byte-offset', '--label'],
+    // `--label` names stdin and prints nothing by itself: the name shows only with -H
+    prefixes: ['-n', '-H', '-b', '--line-number', '--with-filename', '--byte-offset'],
   },
   rg: {
     values: [
@@ -545,7 +547,7 @@ const searchedOf = program => {
  * @returns true when one of the program's prefix flags is given
  * @example
  * prefixesRows({ name: 'grep', args: ['-Hn', '--label=src/x.ts', 'TODO'] }) // => true
- * prefixesRows({ name: 'grep', args: ['-v', 'draft'] }) // => false
+ * prefixesRows({ name: 'grep', args: ['--label=draft.md', '-v', 'draft'] }) // => false
  */
 const prefixesRows = program => {
   const { flags, table } = grepArgs(program)
@@ -553,24 +555,29 @@ const prefixesRows = program => {
 }
 
 /**
- * Whether a line is a grep hit in a file or folder with a space in its name that the command gave the grep:
- * `src/release notes.ts:12:` or, under a folder, `docs/my notes/a.md:3:`, with `-` for context rows.
+ * Whether a line is a grep hit in a file or folder the command gave the grep: `src/release notes.ts:12:`,
+ * `Makefile:3:` or, under a folder, `docs/my notes/a.md:3:`.
  *
- * The strong form takes no path with a space, as prose can hold one before a colon; the command naming the file tells
- * them apart. Each check reads the line once. Called by {@link assignLines}.
+ * The strong form takes no path with a space or without a `.` or `/`, as prose can hold one before a colon; the
+ * command naming the file tells them apart. A context row (`-` for `:`) is taken for a name with a space; for a name
+ * without one it reads like a date (`2026-11-28` after a file named `2026`), so only the hit's `:` form is taken.
+ * Each check reads the line once. Called by {@link assignLines}.
  *
  * @param line - A line of the block.
- * @param grepped - The names with a space the command gave a grep, from {@link planOutput}.
+ * @param grepped - The names the command gave a grep, from {@link planOutput}.
  * @returns true when the line is a hit in one of them
  * @example
  * isHitOf('src/release notes.ts:12:deploy', new Set(['src/release notes.ts'])) // => true
+ * isHitOf('Makefile:3:TODO', new Set(['Makefile'])) // => true
+ * isHitOf('2026-11-28 release', new Set(['2026'])) // => false
  */
 const isHitOf = (line, grepped) => {
   for (const name of grepped) {
     if (!line.startsWith(name)) continue
     const rest = line.slice(name.length)
-    // the line number right after the name, or a path under the named folder before it
-    if (/^[:-]\d+[:-]/.test(rest) || /^\/[^:\n]*[:-]\d+[:-]/.test(rest)) return true
+    // the line number right after the name (a context row's `-` only when the name has a space), or a path under the
+    // named folder before it
+    if ((/\s/.test(name) ? /^[:-]\d+[:-]/ : /^:\d+:/).test(rest) || /^\/[^:\n]*[:-]\d+[:-]/.test(rest)) return true
   }
   return false
 }
