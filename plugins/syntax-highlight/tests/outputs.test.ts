@@ -484,6 +484,70 @@ test('a Markdown line that opens with the grep pattern stays Markdown when a fla
   }
 })
 
+test('a Markdown line that opens with the git grep pattern stays Markdown when a folder given to git is itself named grep', () => {
+  // Arrange: git's own flags take a word each before the subcommand, so the first `grep` is a folder, not the subcommand
+  const commands = [
+    'git -C grep grep -n "release notes" src/a.ts; cat guide.md',
+    'git --namespace grep --config-env core.pager=PAGER --attr-source grep grep -n "release notes" src/a.ts; cat guide.md',
+  ]
+  const lines = ['release notes:12: deploy', '# Guide']
+
+  for (const command of commands) {
+    // Act
+    const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+    // Assert
+    expect({ command, scopes }).toEqual({ command, scopes: [BLOCK, BLOCK] })
+  }
+})
+
+test('a Markdown file piped through cat -- - stays Markdown, as - is stdin after -- too, and a file named -notes.md after -- is read', () => {
+  // Arrange: stdin alone, a file whose name opens with -, stdin with a file of its Language, and with one of another
+  const commands = ['cat guide.md | cat -- -', 'cat -- -notes.md', 'cat guide.md | cat -- - -more.md', 'cat guide.md | cat -- - -more.txt']
+
+  // Act
+  const languages = commands.map(command => planOutput(command, '# Guide').language)
+
+  // Assert: stdin's Markdown passes through, the named file gives its own Language, and two Languages together give none
+  expect(languages).toEqual(['md', 'md', 'md', null])
+})
+
+test('the context rows grep prints around a hit keep their colours inside a TypeScript block, told by the hit beside them', () => {
+  // Arrange: the row before the hit (-B) and the row after it (-A) name the hit's file and the next line number
+  const command = 'cat a.ts; grep -Hn -A 1 -B 1 TODO src/x.ts; cat b.ts'
+  const lines = ['const a = 1;', 'src/x.ts-2-/*', 'src/x.ts:3:// TODO', 'src/x.ts-4-*/', 'const b = 2;']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual([BLOCK, 'text.output.grep', 'text.output.grep', 'text.output.grep', BLOCK])
+})
+
+test('a line shaped like a grep context row stays in the Language when no hit beside it names its file and the next line', () => {
+  // Arrange: prose with a number between dashes, a row of another file, and a row whose number is not the next one
+  const command = 'cat notes.md; grep -Hn -A 1 TODO src/x.ts; cat guide.md'
+  const lines = ['7-day trial', 'src/x.ts:3:// TODO', 'src/y.ts-4-another file', 'src/x.ts-9-not the next line', '# Guide']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual([BLOCK, 'text.output.grep', BLOCK, BLOCK, BLOCK])
+})
+
+test('a Markdown line that opens with a number stays Markdown when the word after it is the value of a wc flag, not a file wc counted', () => {
+  // Arrange: GNU wc's --total takes the next word, which is no file
+  const command = 'wc -l --total never "release notes.md"; cat guide.md'
+  const lines = ['7 release notes.md', '3 never']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual(['text.output.wc', BLOCK])
+})
+
 test('a GNU wc count of a file named after -- (a name that opens with -) keeps its colours, and the file after it opens with its frontmatter', () => {
   // Arrange
   const command = "wc -l -- '-release notes.md'; cat -- '-release notes.md'"
@@ -558,6 +622,8 @@ describe('Output shapes in a block with no Language', () => {
     '12:const deploy = 1',
     'On branch main', '\tmodified:   src/app.ts', '   src/app.ts', 'MM src/b.ts', 'src/app.ts-11-const before = 0',
     'notes.md:deploy on Friday', '  12  48 320 README.md', '120 total', '95 Makefile', 'src/:', 'total 0',
+    // lines holding a character a regex `.` stops at (\r, U+2028, U+2029), in the name and among the counts
+    '1 release notes', '2 deployments failed\r', '12\r', '1 2', '1 2\rnotes.md', ' 1 notes.md', '1 x', '       7 a b',
     ...['.', '/', ':', ' ', '1', '/:', '1 ', '1:', '. ', './', '1.', '1/', '.:', '/1:'].map(fill =>
       fill.repeat(Math.ceil(200 / fill.length)).slice(0, 200),
     ),

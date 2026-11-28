@@ -145,3 +145,40 @@ test('with the editor option at bundled, a Markdown grammar installed for VS Cod
   assert.deepEqual(bundled, [[{ t: '# Title', fg: '#569cd6', b: true, i: false, u: false }]])
   assert.deepEqual(vim, [[{ t: '# Title', fg: '#6a9955', b: false, i: false, u: false }]])
 })
+
+test('a row shaped like a grep hit inside the one TypeScript file a command prints is never given to the grammar, so its `/*` opens no comment', () => {
+  // Arrange: the command prints TypeScript once, so the grammar is started afresh nowhere: only leaving the row out of
+  // it keeps the line after the row out of a comment
+  const output = ['const a = 1;', 'src/other.ts:3:/* TODO', 'const b = 2;'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'grep -c TODO src/other.ts; cat b.ts')
+
+  // Assert
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['const', '#569cd6'], [' ', null], ['b', '#4fc1ff'], [' = ', null], ['2', '#b5cea8'], [';', null]])
+})
+
+test('a grep context row holding `/*` between two TypeScript files leaves the second file TypeScript, not a comment', () => {
+  // Arrange: grep -A 1 prints the hit with colons and the row after it with hyphens
+  const output = ['const a = 1;', 'src/x.ts:2:// TODO', 'src/x.ts-3-/*', 'const b = 2;'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'cat a.ts; grep -Hn -A 1 TODO src/x.ts; cat b.ts')
+
+  // Assert: the second file is TypeScript, and the context row keeps grep's colours
+  assert.deepEqual(lines[3].map(run => [run.t, run.fg]), [['const', '#569cd6'], [' ', null], ['b', '#4fc1ff'], [' = ', null], ['2', '#b5cea8'], [';', null]])
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['src/x.ts', '#4ec9b0'], ['-', null], ['3', '#b5cea8'], ['-/*', null]])
+})
+
+test('a wc row for a file whose name opens with a number colours the counts alone, not the number in the name', () => {
+  // Arrange: GNU wc's rows for a file named with a year, with one count and with three, and a dated name from a glob
+  const output = ['7 2026 release notes.md', '       7      30     200 2026 release notes.md', '  12 2026-11-28.md', '# Guide'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'wc -l "2026 release notes.md"; wc "2026 release notes.md"; wc -l *.md; cat guide.md')
+
+  // Assert
+  assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['7', '#b5cea8'], [' 2026 release notes.md', null]])
+  assert.deepEqual(lines[1].map(run => [run.t, run.fg]), [['       ', null], ['7      30     200', '#b5cea8'], [' 2026 release notes.md', null]])
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['  ', null], ['12', '#b5cea8'], [' 2026-11-28.md', null]])
+})

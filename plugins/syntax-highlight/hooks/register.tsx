@@ -27,8 +27,11 @@ type BashOutput = {
   bashEditDiff?: unknown
   viewedImagePaths?: unknown
 }
-/** What of a Bash result this mod draws: the stdout it colours, and whether Claude Code has rows of its own under it. */
-type Colourable = { stdout: string; hasSiblings: boolean }
+/**
+ * What of a Bash result this mod draws: the stdout it colours, and the rows Claude Code has of its own under it (the
+ * stderr as it is drawn, and whether there are rows whose height this mod cannot count: an edit diff, images).
+ */
+type Colourable = { stdout: string; stderr: string; hasUncountedRows: boolean; hasSiblings: boolean }
 
 const SHOW_CODE = 'mcp__syntax-highlight__show_code'
 const DIM_TO = '#999999'
@@ -299,12 +302,14 @@ const shownStderr = (stderr: string) => {
  * colour before the first draw) and the `ToolResult` hook.
  *
  * @param output - The tool's result record.
- * @returns the stdout with its trailing blank space cut and whether sibling rows exist, or null when Claude Code should
- *   draw the whole result (an interrupt, an image, a background task, no stdout, or a character a drawn Text refuses,
- *   as an ANSI colour's ESC)
+ * @returns the stdout with its trailing blank space cut and the sibling rows (the stderr as drawn, whether an edit diff
+ *   or images follow, whether any sibling row exists), or null when Claude Code should draw the whole result (an
+ *   interrupt, an image, a background task, no stdout, or a character a drawn Text refuses, as an ANSI colour's ESC)
  * @example
- * colourableResult({ stdout: 'a\nb\n', stderr: '' }) // => { stdout: 'a\nb', hasSiblings: false }
- * colourableResult({ stdout: 'a', stderr: '\nShell cwd was reset to /x' }) // => { stdout: 'a', hasSiblings: true }
+ * colourableResult({ stdout: 'a\nb\n', stderr: '' })
+ * // => { stdout: 'a\nb', stderr: '', hasUncountedRows: false, hasSiblings: false }
+ * colourableResult({ stdout: 'a', stderr: '\nShell cwd was reset to /x' })
+ * // => { stdout: 'a', stderr: 'Shell cwd was reset to /x', hasUncountedRows: false, hasSiblings: true }
  * colourableResult({ stdout: 'a', interrupted: true }) // => null
  */
 const colourableResult = (output: unknown): Colourable | null => {
@@ -316,9 +321,11 @@ const colourableResult = (output: unknown): Colourable | null => {
   // a tree holding a character Text refuses is refused, and with the sibling rows asked for, their drawing would stand
   // alone with the stdout taken out
   if (stdout === '' || REFUSED_IN_TEXT.test(stdout)) return null
-  const hasStderr = typeof out.stderr === 'string' && shownStderr(out.stderr) !== ''
+  const stderr = typeof out.stderr === 'string' ? shownStderr(out.stderr) : ''
   const hasImages = Array.isArray(out.viewedImagePaths) && out.viewedImagePaths.length > 0
-  return { stdout, hasSiblings: hasStderr || Boolean(out.bashEditDiff) || hasImages }
+  // an edit diff and images take rows that only Claude Code, which draws them, can count
+  const hasUncountedRows = Boolean(out.bashEditDiff) || hasImages
+  return { stdout, stderr, hasUncountedRows, hasSiblings: stderr !== '' || hasUncountedRows }
 }
 
 /**
@@ -375,24 +382,28 @@ const cellsOf = (ch: string) => (WIDE.test(ch) ? 2 : 1)
  *
  * The main screen cannot rewrite rows that have scrolled off it, so a block Claude Code drew before its colours were
  * back (a resumed session, a slow worker) and then redrawn in colour would leave the scrolled-off rows of the first
- * drawing above the new one, doubled. Collapsed, a block takes a few rows; in fullscreen the screen redraws all of
- * itself. Called by the `ToolResult` hook whenever Claude Code draws a block it colours.
+ * drawing above the new one, doubled. The sibling rows under the stdout are part of that drawing: stderr's rows are
+ * counted with the stdout's, and a block with an edit diff or images, whose rows cannot be counted here, is taken as
+ * too tall. Collapsed, a block takes a few rows; in fullscreen the screen redraws all of itself. Called by the
+ * `ToolResult` hook whenever Claude Code draws a block it colours.
  *
- * @param stdout - The block's text.
+ * @param drawn - The block's stdout and its sibling rows, from {@link colourableResult}.
  * @param isExpanded - Whether every line is drawn (ctrl+o, verbose), not the fold.
  * @param viewport - The render event's screen size and kind; absent where no surface has measured.
- * @returns true when the block's wrapped rows and the prompt below them pass the main screen's height
+ * @returns true when the block's wrapped rows, its sibling rows and the prompt below them pass the main screen's height
  * @example
- * isTooTallToRedraw(fortyLines, true, { columns: 80, rows: 24, isFullscreen: false }) // => true
- * isTooTallToRedraw('議'.repeat(60), true, { columns: 80, rows: 9, isFullscreen: false }) // => true (two rows)
+ * const mainScreen = { columns: 80, rows: 24, isFullscreen: false }
+ * isTooTallToRedraw({ stdout: fortyLines, stderr: '', hasUncountedRows: false, hasSiblings: false }, true, mainScreen) // => true
+ * isTooTallToRedraw({ stdout: 'a', stderr: '', hasUncountedRows: true, hasSiblings: true }, true, mainScreen) // => true
  */
-const isTooTallToRedraw = (stdout: string, isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen?: boolean } | undefined) => {
+const isTooTallToRedraw = (drawn: Colourable, isExpanded: boolean, viewport: { columns: number; rows: number; isFullscreen?: boolean } | undefined) => {
   if (!isExpanded || viewport === undefined || viewport.isFullscreen !== false) return false
+  if (drawn.hasUncountedRows) return true
   const width = Math.max(viewport.columns - FOLD_INDENT, 10)
   let rows = PROMPT_ROWS
-  // add each line's wrapped rows, in the cells a terminal gives it (two for a wide character), stopping once past the
-  // screen
-  for (const line of stdout.split('\n')) {
+  // add each line's wrapped rows, the stdout's and then the stderr's, in the cells a terminal gives it (two for a wide
+  // character), stopping once past the screen
+  for (const line of (drawn.stderr === '' ? drawn.stdout : `${drawn.stdout}\n${drawn.stderr}`).split('\n')) {
     let cells = 0
     for (const ch of line) cells += cellsOf(ch)
     rows += Math.max(1, Math.ceil(cells / width))
@@ -569,10 +580,11 @@ export const register: Register = (on, userOptions) => {
     if (result === null) return next(e)
     const id = e.props.tool_use_id
     const isExpanded = e.props.isExpanded === true
-    // Claude Code draws the block until its colours are back; an expanded one too tall for the main screen to redraw
-    // whole stays as Claude Code drew it, so no scrolled-off rows of this drawing are left doubled above a coloured one
+    // Claude Code draws the block until its colours are back; an expanded one too tall, with its sibling rows, for the
+    // main screen to redraw whole stays as Claude Code drew it, so no scrolled-off rows of this drawing are left
+    // doubled above a coloured one
     const drawnByClaudeCode = () => {
-      if (isTooTallToRedraw(result.stdout, isExpanded, e.viewport)) remember(keptAsDrawn, id, true, MAX_CALLS)
+      if (isTooTallToRedraw(result, isExpanded, e.viewport)) remember(keptAsDrawn, id, true, MAX_CALLS)
       return next(e)
     }
     // drawn before its command is known (a resumed session draws results first): Claude Code draws it until the ToolUse

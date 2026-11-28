@@ -747,6 +747,58 @@ test('an expanded block taller than the main screen that Claude Code drew first 
   for (const handle of [tall, short, tallInFullscreen, tallInWideCharacters, tallInEmoji, tallInAnotherView, ...rows]) await handle.unmount()
 })
 
+test('an expanded block that fits the main screen only without its stderr rows stays as Claude Code drew it once its colours are back', async ($, on) => {
+  // Arrange: 14 lines and the prompt's 8 rows fit a 24-row main screen; three rows of stderr under them do not, one does
+  standInForClaudeCode(on)
+  const mainScreen = { columns: 80, rows: 24, isFullscreen: false }
+  const stdout = `${Array.from({ length: 14 }, (_, n) => `- item ${n}`).join('\n')}\n`
+  const rows = [
+    await $.ui.mount({ ...commandRow('call-57', 'cd /tmp/site && cat list.md'), viewport: mainScreen }),
+    await $.ui.mount({ ...commandRow('call-58', 'cd /tmp/site && cat list.md'), viewport: mainScreen }),
+  ]
+  const threeRowsOfStderr = { stdout, stderr: 'warning: one\nwarning: two\nShell cwd was reset to /Users/me/project', interrupted: false, isImage: false }
+  const oneRowOfStderr = { stdout, stderr: CWD_NOTICE, interrupted: false, isImage: false }
+  const pastTheScreen = await $.ui.mount({ ...outputBlock('call-57', threeRowsOfStderr, true), viewport: mainScreen })
+  const withinTheScreen = await $.ui.mount({ ...outputBlock('call-58', oneRowOfStderr, true), viewport: mainScreen })
+
+  // Act: both are drawn again with their colours back
+  for (const block of [pastTheScreen, withinTheScreen]) await block.redraw()
+
+  // Assert: the first stays whole as Claude Code drew it; the second is coloured above Claude Code's notice
+  expect((await pastTheScreen.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  const texts = (await withinTheScreen.findAll({ type: 'Text' })).map(t => t.text)
+  expect(texts).toContain('- item 0')
+  expect(texts.filter(text => text === CLAUDE_CODE_DRAWS)).toHaveLength(1)
+  for (const handle of [pastTheScreen, withinTheScreen, ...rows]) await handle.unmount()
+})
+
+test('an expanded block with an edit diff or images under it that Claude Code drew first on the main screen stays as drawn once its colours are back', async ($, on) => {
+  // Arrange: one line of stdout over sibling rows whose height only Claude Code knows, and the same in fullscreen,
+  // which redraws all of itself
+  standInForClaudeCode(on)
+  const mainScreen = { columns: 80, rows: 24, isFullscreen: false }
+  const fullscreen = { columns: 80, rows: 24, isFullscreen: true }
+  const withEditDiff = { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false, bashEditDiff: { files: [{ filePath: '/repo/notes.md', hunks: [] }] } }
+  const withImage = { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false, viewedImagePaths: ['/repo/shot.png'] }
+  const rows = [
+    await $.ui.mount({ ...commandRow('call-59', 'cat notes.md'), viewport: mainScreen }),
+    await $.ui.mount({ ...commandRow('call-60', 'cat notes.md'), viewport: mainScreen }),
+    await $.ui.mount({ ...commandRow('call-61', 'cat notes.md'), viewport: fullscreen }),
+  ]
+  const editDiffOnMainScreen = await $.ui.mount({ ...outputBlock('call-59', withEditDiff, true), viewport: mainScreen })
+  const imageOnMainScreen = await $.ui.mount({ ...outputBlock('call-60', withImage, true), viewport: mainScreen })
+  const editDiffInFullscreen = await $.ui.mount({ ...outputBlock('call-61', withEditDiff, true), viewport: fullscreen })
+
+  // Act: each is drawn again with its colours back
+  for (const block of [editDiffOnMainScreen, imageOnMainScreen, editDiffInFullscreen]) await block.redraw()
+
+  // Assert
+  expect((await editDiffOnMainScreen.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await imageOnMainScreen.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect((await editDiffInFullscreen.findAll({ type: 'Text' })).map(t => t.text)).toContain('# Notes')
+  for (const handle of [editDiffOnMainScreen, imageOnMainScreen, editDiffInFullscreen, ...rows]) await handle.unmount()
+})
+
 test('a subagent\'s Bash call returns at once, with no colours made for rows this transcript does not draw as it ends', async ($, on) => {
   // Arrange: a worker and a wait that record being asked
   const workerInputs: string[] = []
