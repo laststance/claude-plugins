@@ -468,7 +468,8 @@ const scopeOf = (kind: string, id: string) => `syntax-highlight:${kind}${id.slic
 const drawnNodes = (rows: Run[][]) => rows.reduce((sum, runs) => sum + 1 + 2 * Math.max(runs.length, 1), 0)
 
 /**
- * How many characters of text an Output block's rows show in a drawn tree, counted as the engine counts its 100,000.
+ * How many characters of text an Output block's rows show in a drawn tree, counted as the engine counts its 100,000:
+ * an empty row draws one space ({@link renderRuns}).
  *
  * The `ToolResult` hook checks it against {@link MAX_DRAWN_CHARACTERS} before drawing: past it, the engine would cut the
  * block's end with no mark, where Claude Code draws it whole.
@@ -478,7 +479,7 @@ const drawnNodes = (rows: Run[][]) => rows.reduce((sum, runs) => sum + 1 + 2 * M
  * @example
  * drawnCharacters([[{ t: 'abc', fg: null, b: false, i: false, u: false }], []]) // => 3
  */
-const drawnCharacters = (rows: Run[][]) => rows.reduce((sum, runs) => sum + runs.reduce((n, run) => n + run.t.length, 0), 0)
+const drawnCharacters = (rows: Run[][]) => rows.reduce((sum, runs) => sum + (runs.length === 0 ? 1 : runs.reduce((n, run) => n + run.t.length, 0)), 0)
 
 /**
  * Draws runs as Text: a coloured run pulled toward grey by `strength`, brightened while hovered.
@@ -643,8 +644,10 @@ export const register: Register = (on, userOptions) => {
     if (payload === null) return next(e)
 
     const row = e.props.tool_use_id === undefined ? null : String(e.props.tool_use_id)
-    // a row coloured before whose colours were pushed out of the cache since: Claude Code draws it
-    const done = coloursOf(payload) ?? (row !== null && colouredRows.has(row) ? 'plain' : undefined)
+    // a command row coloured before whose colours were pushed out of the cache since: Claude Code draws it, so redrawing
+    // more rows than the cache holds starts no workers without end. A snippet is coloured again instead: its panel is
+    // the one place show_code draws its code, and a session shows few
+    const done = coloursOf(payload) ?? (row !== null && isBash && colouredRows.has(row) ? 'plain' : undefined)
     if (done === undefined) void highlight($, payload)
     if (done === undefined || done === 'pending' || done === 'failed' || done === 'plain') return next(e)
     if (row !== null) remember(colouredRows, row, true, MAX_CALLS)

@@ -6,6 +6,8 @@ import type { Plugin } from 'claude-code/testing'
 declare function setTimeout(callback: () => void, ms: number): unknown
 
 const PLUGIN = 'syntax-highlight'
+// the tool the mod registers for Claude to show a snippet, as Claude Code names it
+const SHOW_CODE = 'mcp__syntax-highlight__show_code'
 const CLAUDE_CODE_DRAWS = 'claude code draws this row'
 const CWD_NOTICE = '\nShell cwd was reset to /Users/me/project'
 const MEMORY_COMMAND = 'cd /Users/me/.claude/projects/app/memory; cat deploy-lock.md'
@@ -597,6 +599,79 @@ test('an expanded block with more text than one drawing shows (100,000 character
   for (const handle of [block, row]) await handle.unmount()
 })
 
+test('an expanded block whose empty rows bring its text past what one drawing shows, with a cwd notice, is drawn by Claude Code whole', async ($, on) => {
+  // Arrange: three lines of 31,666 characters (94,998 in all) and 4,996 empty lines, each drawn as one space
+  const seen = standInForClaudeCode(on)
+  const row = await $.ui.mount(commandRow('call-57', 'cd /tmp/data; cat sparse.md'))
+  const stdout = `${['a', 'b', 'c'].map(letter => letter.repeat(31_666)).join('\n')}${'\n'.repeat(4_997)}z\n`
+  const output = { stdout, stderr: CWD_NOTICE, interrupted: false, isImage: false }
+
+  // Act
+  const block = await $.ui.mount(outputBlock('call-57', output, true))
+  await block.redraw()
+
+  // Assert: Claude Code draws the record as it is, so no end of it is cut
+  expect((await block.findAll({ type: 'Text' })).map(t => t.text)).toEqual([CLAUDE_CODE_DRAWS])
+  expect(seen.drawnByClaudeCode.at(-1)).toEqual(output)
+  for (const handle of [block, row]) await handle.unmount()
+})
+
+test('a show_code panel whose colours 200 newer commands pushed out of the cache is coloured again when drawn', { timeoutMs: 60_000 }, async ($, on) => {
+  // Arrange: a worker answering at once, and a count of the redraws asked as each colouring is kept
+  const asked: string[] = []
+  let kept = 0
+  let wanted = 0
+  let onKept: () => void = () => {}
+  const colouringsKept = (count: number) =>
+    new Promise<void>(resolve => {
+      wanted = count
+      onKept = resolve
+      if (kept >= wanted) resolve()
+    })
+  on('ui.render', ($, e) => {
+    const { Text } = $.ui.resolve(e)
+
+    return <Text>{CLAUDE_CODE_DRAWS}</Text>
+  })
+  on('process.run', (_, e) => {
+    const input = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
+    const text = String(input.code ?? input.command ?? '')
+    asked.push(text)
+    const lines = [[{ t: text, fg: '#ff0000', b: false, i: false, u: false }]]
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.invalidate', (_, e, next) => {
+    kept++
+    if (kept >= wanted) onKept()
+
+    return next(e)
+  })
+  const snippet = {
+    plugin: PLUGIN,
+    surface: 'terminal',
+    component: 'ToolUse',
+    requestId: 'call-56',
+    props: { tool_use_id: 'call-56', tool: SHOW_CODE, input: { code: 'const deploy = 1', language: 'ts' }, isRunning: false, isErrored: false, isInterrupted: false, isExpanded: true },
+  } as const
+  const panel = await $.ui.mount(snippet)
+  await colouringsKept(1)
+  await panel.redraw()
+  const rows: Array<{ unmount: () => Promise<void> }> = []
+  for (let n = 0; n < 200; n++) rows.push(await $.ui.mount(commandRow(`call-push-${n}`, `cat push-${n}.md`)))
+  await colouringsKept(201)
+
+  // Act: the panel is drawn again, and once more when its colours are back
+  await panel.redraw()
+  await colouringsKept(202)
+  await panel.redraw()
+
+  // Assert: the snippet went to a worker again, and the panel is the mod's
+  expect(asked.filter(text => text === 'const deploy = 1')).toHaveLength(2)
+  expect((await panel.findAll({ type: 'Text' })).map(t => t.text)).not.toContain(CLAUDE_CODE_DRAWS)
+  for (const handle of [panel, ...rows]) await handle.unmount()
+})
+
 test('a diff -u that exits 1 because the files differ has its diff coloured', async ($, on) => {
   // Arrange: Claude Code explains the exit code, which it shows only for an empty stdout
   standInForClaudeCode(on)
@@ -705,6 +780,9 @@ test('more distinct command rows than the colour cache holds, drawn again while 
   const started: string[] = []
   let release: () => void = () => {}
   const held = new Promise<void>(resolve => (release = resolve))
+  let finished = 0
+  let allFinished: () => void = () => {}
+  const everyColouringFinished = new Promise<void>(resolve => (allFinished = resolve))
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -714,6 +792,7 @@ test('more distinct command rows than the colour cache holds, drawn again while 
     const asked = JSON.parse(String(e.init?.stdin ?? '{}')) as Record<string, unknown>
     started.push(String(asked.command ?? ''))
     await held
+    if (++finished === 205) allFinished()
     const lines = [[{ t: String(asked.command ?? ''), fg: '#ff0000', b: false, i: false, u: false }]]
 
     return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
@@ -724,7 +803,7 @@ test('more distinct command rows than the colour cache holds, drawn again while 
   // Act: every row is drawn again while the workers are held, then they are let go
   for (const row of rows) await row.redraw()
   release()
-  await new Promise(resolve => setTimeout(() => resolve(undefined), 1000))
+  await everyColouringFinished
 
   // Assert: 205 commands, each coloured once
   expect(started.length).toBe(205)
