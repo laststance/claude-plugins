@@ -336,7 +336,9 @@ export const planOutput = (command, output) => {
  * the first file's state (an open comment) must not run into it, and its frontmatter must open it. With one print, a
  * row of a shape inside it is the file's own text (an example in a fenced block), so the state runs on across it.
  * With several prints, a shape row inside one of the files (a git status line in a comment) restarts the grammar too:
- * the output does not say where each print ends.
+ * the output does not say where each print ends. A print of the Language piped through a grep that writes a prefix
+ * before each row (`cat a.ts | grep -Hn --label=a.ts TODO`) is that grep's rows, not a print of the Language; through
+ * a grep that writes none (`grep -v draft`), it stays one.
  * Called by tokenize.mjs.
  *
  * @param command - The shell command the Bash call ran, or '' when unknown.
@@ -352,16 +354,19 @@ export const readsApart = command => {
   let hasShapesSince = false
   let fed = null
   let names = []
+  let isPrefixed = false
   for (const seg of segments) {
     const program = programOf(seg)
     if (program !== null) {
       fed = languageOf(program, fed)
       names.push(...namesOf(program))
+      // a grep anywhere in the pipeline that writes a prefix before each row makes the pipeline's rows the grep shape's
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name)) && prefixesRows(program)) isPrefixed = true
     }
     // only the last stage of a pipeline prints
     if (seg.op === '|' || seg.op === '|&') continue
     const prints = program !== null && !SILENT.has(program.name)
-    if (prints && fed !== null) {
+    if (prints && fed !== null && !isPrefixed) {
       // the Language printed again after another program's rows: a file of its own
       if (hasPrintedLanguage && hasShapesSince) return true
       hasPrintedLanguage = true
@@ -371,6 +376,7 @@ export const readsApart = command => {
     }
     fed = null
     names = []
+    isPrefixed = false
   }
   return false
 }
@@ -422,11 +428,12 @@ const operandsOf = (args, valueFlags) => {
   return words
 }
 
-// flags that take a value, by program, and those of them that give the pattern (ag has none: its -f follows links).
-// A flag missing here leaves its value among the words, where the first is taken for the pattern and the pattern for a
-// file (`rg --color never "release notes" src`), so each list holds every such flag in the program's own help: GNU and
-// BSD grep with git grep, rg 16 and ag 2.2. A value that is optional and joined with `=` (grep's `--color=never`) is
-// not one
+// flags that take a value, by program, those of them that give the pattern (ag has none: its -f follows links), and
+// the flags with which the program writes a file name or a number before each row it prints.
+// A value flag missing here leaves its value among the words, where the first is taken for the pattern and the pattern
+// for a file (`rg --color never "release notes" src`), so each list holds every such flag in the program's own help:
+// GNU and BSD grep with git grep, rg 16 and ag 2.2. A value that is optional and joined with `=` (grep's
+// `--color=never`) is not one
 const GREP_FLAGS = {
   grep: {
     values: [
@@ -434,6 +441,7 @@ const GREP_FLAGS = {
       '--binary-files', '--devices', '--directories', '--group-separator', '--max-depth', '--threads', '--parent-basename',
     ],
     patterns: ['-e', '-f', '--regexp', '--file'],
+    prefixes: ['-n', '-H', '-b', '--line-number', '--with-filename', '--byte-offset', '--label'],
   },
   rg: {
     values: [
@@ -444,6 +452,7 @@ const GREP_FLAGS = {
       '--hyperlink-format', '--dfa-size-limit', '--regex-size-limit', '--generate',
     ],
     patterns: ['-e', '-f', '--regexp', '--file'],
+    prefixes: ['-n', '-H', '-b', '--line-number', '--with-filename', '--byte-offset', '--column', '--vimgrep'],
   },
   ag: {
     values: [
@@ -451,32 +460,36 @@ const GREP_FLAGS = {
       '--width', '--workers', '--color-line-number', '--color-match', '--color-path', '--ackmate-dir-filter',
     ],
     patterns: [],
+    prefixes: ['-H', '--heading', '--numbers', '--filename', '--column', '--ackmate', '--vimgrep'],
   },
 }
 // context and count flags take a number in every grep; ag's can go without one, so only a number is taken as theirs
 const COUNT_FLAGS = new Set(['-A', '-B', '-C', '-m', '--after-context', '--before-context', '--context', '--max-count', '--after', '--before'])
 
 /**
- * The files and folders a grep searches: its words that are not flags, flag values or the pattern.
+ * A grep's flags and its other words, told apart as getopt tells them, with the program's own table (rg's `-t` takes a
+ * file type, ag's takes nothing).
  *
- * Flags are read as getopt reads them, with each program's own table (rg's `-t` takes a file type, ag's takes nothing):
- * in a group of short flags, the first that takes a value takes the rest of the group (`-efoo`) or else the next word
- * (`-ne foo`); a long flag takes the next word unless joined with `=`; `--` ends the flags. The pattern is the value of
- * `-e` or `-f`, else the first word left. Called by {@link planOutput}.
+ * In a group of short flags, the first that takes a value takes the rest of the group (`-efoo`) or else the next word
+ * (`-ne foo`); a long flag takes the next word unless joined with `=`; `--` ends the flags. Called by
+ * {@link searchedOf} and {@link prefixesRows}.
  *
  * @param program - A grep, rg, ag or git grep program, from programOf.
- * @returns the searched names, in order
+ * @returns `flags` (each short flag as `-n`, each long one by its name), `words` (neither flags nor their values, in
+ *   order), `hasPatternFlag` (a flag gave the pattern, so no word is it) and the program's `table` in {@link GREP_FLAGS}
  * @example
- * searchedOf({ name: 'grep', args: ['-n', 'release notes', 'src/app.ts'] }) // => ['src/app.ts']
+ * grepArgs({ name: 'grep', args: ['-Hn', '-e', 'release notes', 'src/app.ts'] })
+ * // => { flags: Set { '-H', '-n', '-e' }, words: ['src/app.ts'], hasPatternFlag: true, table: GREP_FLAGS.grep }
  */
-const searchedOf = program => {
-  const { values, patterns } = GREP_FLAGS[program.name === 'rg' || program.name === 'ag' ? program.name : 'grep']
-  const takesValue = flag => values.includes(flag) || COUNT_FLAGS.has(flag)
+const grepArgs = program => {
+  const table = GREP_FLAGS[program.name === 'rg' || program.name === 'ag' ? program.name : 'grep']
+  const takesValue = flag => table.values.includes(flag) || COUNT_FLAGS.has(flag)
   // a count flag takes the next word only when it is a number
   const takesNext = (flag, next) => !COUNT_FLAGS.has(flag) || /^\d+$/.test(next ?? '')
   // git grep's words start after its subcommand, found as namesOf finds it: in `git -C grep grep`, the first `grep` is
   // a folder
   const args = program.name === 'git' ? gitSubcommand(program.args).rest : program.args
+  const flags = new Set()
   const words = []
   let hasPatternFlag = false
   for (let k = 0; k < args.length; k++) {
@@ -487,7 +500,8 @@ const searchedOf = program => {
     }
     if (arg.startsWith('--')) {
       const flag = arg.split('=')[0]
-      if (patterns.includes(flag)) hasPatternFlag = true
+      flags.add(flag)
+      if (table.patterns.includes(flag)) hasPatternFlag = true
       if (takesValue(flag) && !arg.includes('=') && takesNext(flag, args[k + 1])) k++
       continue
     }
@@ -495,8 +509,9 @@ const searchedOf = program => {
       // a group of short flags: the first that takes a value takes the rest of the group, or else the next word
       for (let c = 1; c < arg.length; c++) {
         const flag = `-${arg[c]}`
+        flags.add(flag)
         if (!takesValue(flag)) continue
-        if (patterns.includes(flag)) hasPatternFlag = true
+        if (table.patterns.includes(flag)) hasPatternFlag = true
         if (c === arg.length - 1 && takesNext(flag, args[k + 1])) k++
         break
       }
@@ -504,8 +519,37 @@ const searchedOf = program => {
     }
     words.push(arg)
   }
+  return { flags, words, hasPatternFlag, table }
+}
+
+/**
+ * The files and folders a grep searches: its words that are not flags, flag values or the pattern. The pattern is the
+ * value of `-e` or `-f`, else the first word left. Called by {@link planOutput}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns the searched names, in order
+ * @example
+ * searchedOf({ name: 'grep', args: ['-n', 'release notes', 'src/app.ts'] }) // => ['src/app.ts']
+ */
+const searchedOf = program => {
+  const { words, hasPatternFlag } = grepArgs(program)
   // without -e or -f, the first word is the pattern
   return hasPatternFlag ? words : words.slice(1)
+}
+
+/**
+ * Whether a grep writes a file name or a number before each row it prints (`grep -Hn`, `rg --vimgrep`): its rows are
+ * then the `grep` shape's, not lines of the text it read. Called by {@link readsApart}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns true when one of the program's prefix flags is given
+ * @example
+ * prefixesRows({ name: 'grep', args: ['-Hn', '--label=src/x.ts', 'TODO'] }) // => true
+ * prefixesRows({ name: 'grep', args: ['-v', 'draft'] }) // => false
+ */
+const prefixesRows = program => {
+  const { flags, table } = grepArgs(program)
+  return table.prefixes.some(flag => flags.has(flag))
 }
 
 /**

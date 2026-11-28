@@ -182,3 +182,31 @@ test('a wc row for a file whose name opens with a number colours the counts alon
   assert.deepEqual(lines[1].map(run => [run.t, run.fg]), [['       ', null], ['7      30     200', '#b5cea8'], [' 2026 release notes.md', null]])
   assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['  ', null], ['12', '#b5cea8'], [' 2026-11-28.md', null]])
 })
+
+test('a file cut inside a block comment does not turn the file printed after a numbered grep of piped text into a comment', () => {
+  // Arrange: the first line of `intro.ts` opens a comment; the text piped into grep comes out as grep's rows (-Hn with a
+  // label), then `app.ts` follows
+  const output = ['/* licence', 'src/x.ts:3:// TODO', 'const version = 1;'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'head -n 1 intro.ts; cat src/x.ts | grep -Hn --label=src/x.ts TODO; cat app.ts')
+
+  // Assert: app.ts is TypeScript, and the comment stays the first file's
+  assert.deepEqual(lines[2].map(run => [run.t, run.fg]), [['const', '#569cd6'], [' ', null], ['version', '#4fc1ff'], [' = ', null], ['1', '#b5cea8'], [';', null]])
+  assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['/* licence', '#6a9955']])
+})
+
+test('Markdown piped through a grep that writes no prefix, between two other files, keeps a fenced example holding a grep hit whole', () => {
+  // Arrange: three prints of Markdown, the middle one through a grep that writes its lines as they are. The grep hit
+  // inside the fence is a file's own text, and no row of another program sits between the prints, so the grammar runs
+  // on across it
+  const output = ['# Guide', '', '```sh', 'src/a.ts:12:const a = 1', '```', '', '**Why:** bold here'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'cat intro.md; cat draft.md | grep -v draft; cat guide.md')
+
+  // Assert: the fence closes where the file closes it, so `**Why:**` is bold Markdown, not the fence's code
+  const why = lines[6][0]
+  assert.equal(why.t, '**Why:**')
+  assert.equal(why.b, true)
+})

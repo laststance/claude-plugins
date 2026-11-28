@@ -102,7 +102,7 @@ describe('Output shapes in an Output block', () => {
   test('a block mixing grep hits, an ls listing and plutil pairs colours each line by its shape', () => {
     // Arrange
     const command =
-      'echo "--- obsidian lines"; grep -n -i obsidian ~/.zprofile; ls -la /Applications/Obsidian.app/Contents/MacOS/; plutil -p Info.plist | grep -E CFBundleName -A3 | head -30'
+      'echo "--- obsidian lines"; grep -Hn -i obsidian ~/.zprofile; ls -la /Applications/Obsidian.app/Contents/MacOS/; plutil -p Info.plist | grep -E CFBundleName -A3 | head -30'
     const lines = [
       '--- obsidian lines',
       '/Users/me/.zprofile:3:# Added by Obsidian',
@@ -429,7 +429,7 @@ test('grep hits in a file or folder with a space in its name that the command gr
     { command: 'grep -Hn deploy "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:12:deploy', '# Guide', '12: items'] },
     { command: 'grep -rn deploy "docs/my notes"; cat guide.md', lines: ['docs/my notes/a.md:3:deploy', '# Guide', '12: items'] },
     // the pattern given with -e and a context value before the file
-    { command: 'grep -n -A 2 -e "release notes" "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:x', '# Guide', 'release notes:12: deploy'] },
+    { command: 'grep -Hn -A 2 -e "release notes" "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:x', '# Guide', 'release notes:12: deploy'] },
     // ag's -t takes no value (all text files), while rg's -t takes a file type
     { command: 'ag --nogroup --filename --nocolor -t deploy "src/release notes.ts"; cat guide.md', lines: ['src/release notes.ts:3:deploy', '# Guide', '12: items'] },
     { command: 'rg -n -t md "two words" "docs/a b"; cat guide.md', lines: ['docs/a b/x.md:3:two words', '# Guide', '12: items'] },

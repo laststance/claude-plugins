@@ -1027,16 +1027,36 @@ test('many coloured rows drawn together (a resumed session) run at most four col
   for (const handle of handles) await handle.unmount()
 })
 
-// last in this file: its worker never answers and keeps two worker slots for the rest of the run
 test('a Bash call whose colours are not back within 1.5 s returns its result then, without waiting for the worker', async ($, on) => {
-  // Arrange: the worker never answers; the wait's timer fires at once and records how long it was asked to wait
+  // Arrange: the workers are held until the test lets them go; the wait's timer fires at once and records how long it
+  // was asked to wait. The mod asks for a redraw once for each colouring it has kept
   const waits: number[] = []
+  const held: Array<() => void> = []
+  let kept = 0
+  let wanted = Infinity
+  let onKept: () => void = () => {}
+  const colouringsKept = (count: number) =>
+    new Promise<void>(resolve => {
+      wanted = count
+      onKept = resolve
+      if (kept >= wanted) resolve()
+    })
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
     return <Text>{CLAUDE_CODE_DRAWS}</Text>
   })
-  on('process.run', () => new Promise<never>(() => {}))
+  on('process.run', async () => {
+    await new Promise<void>(resolve => held.push(resolve))
+
+    return { value: { exitCode: 0, stdout: JSON.stringify({ editor: 'test', theme: 'test', lines: [] }), stderr: '', isStdoutTruncated: false, isStderrTruncated: false } }
+  })
+  on('ui.invalidate', (_, e, next) => {
+    kept++
+    if (kept >= wanted) onKept()
+
+    return next(e)
+  })
   on('clock.sleep', (_, e) => {
     waits.push(e.ms)
 
@@ -1044,10 +1064,19 @@ test('a Bash call whose colours are not back within 1.5 s returns its result the
   })
   on('tool.call', () => ({ result: { stdout: '# Notes\n', stderr: '', interrupted: false, isImage: false } }))
 
-  // Act
-  const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-42' } as never)
+  try {
+    // Act
+    const done = await $.tool.call({ tool: 'Bash', command: 'cat notes.md', tool_use_id: 'call-42' } as never)
 
-  // Assert: the call returned its own result, after the 1.5 s wait it promises
-  expect((done as { result?: { stdout?: string } }).result?.stdout).toBe('# Notes\n')
-  expect(waits).toEqual([1500])
+    // Assert: the call returned its own result after the 1.5 s wait it promises, with both its workers (the command's
+    // and the block's) still running
+    expect((done as { result?: { stdout?: string } }).result?.stdout).toBe('# Notes\n')
+    expect(waits).toEqual([1500])
+    expect(held).toHaveLength(2)
+  } finally {
+    // the workers answer and their colours are kept, so no worker slot stays taken for the tests after this one
+    const running = held.length
+    while (held.length > 0) held.shift()?.()
+    await colouringsKept(running)
+  }
 })
