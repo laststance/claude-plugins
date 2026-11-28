@@ -9,6 +9,7 @@ export const lex = src => {
   let seg = { words: [], heredocs: [], redirs: [] }
   const pending = []
   let next = null // flag for the next word: 'redir' | 'herestring' | 'heretag'
+  let isStdin = false // the next 'redir' word is the file a `<` reads
   const endSegment = op => { if (seg.words.length || seg.heredocs.length) { seg.op = op; segments.push(seg) } seg = { words: [], heredocs: [], redirs: [] } }
 
   let i = 0
@@ -39,6 +40,8 @@ export const lex = src => {
         next = o.includes('<<<') ? 'herestring' : (o.includes('-') ? 'heretagStrip' : 'heretag')
       } else if (/[<>]/.test(o)) {
         next = /&\d*-?$/.test(o) ? null : 'redir'
+        // `< file` (or `0< file`) feeds the segment's stdin: the word after it is kept as seg.stdin too
+        isStdin = /^0?<$/.test(o)
       } else if (o !== '&>' && o !== '&>>') {
         endSegment(o)
       } else next = 'redir'
@@ -88,7 +91,11 @@ export const lex = src => {
       const h = { tag: value, strip: next === 'heretagStrip', body: null }
       pending.push(h); seg.heredocs.push(h)
     } else if (next === 'herestring') seg.herestring = word
-    else if (next === 'redir') seg.redirs.push(word)
+    else if (next === 'redir') {
+      seg.redirs.push(word)
+      if (isStdin) seg.stdin = word
+      isStdin = false
+    }
     else seg.words.push(word)
     next = null
   }

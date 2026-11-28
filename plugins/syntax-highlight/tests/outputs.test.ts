@@ -11,7 +11,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '# Pitfalls from real runs')
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: [], counted: [], grepped: [] })
+    expect(plan).toEqual({ language: 'md', shapes: [], counted: [], columns: [], grepped: [] })
   })
 
   test('a file printed through head keeps the file\'s Language', () => {
@@ -94,7 +94,7 @@ describe('the Language of a whole Output block', () => {
     const plan = planOutput(command, '{\n  "CFBundleName" => "Grok Bot"\n}')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['plutil'], counted: [], grepped: [] })
+    expect(plan).toEqual({ language: null, shapes: ['plutil'], counted: [], columns: [], grepped: [] })
   })
 })
 
@@ -120,7 +120,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [], grepped: ['~/.zprofile'] })
+    expect(plan).toEqual({ language: null, shapes: ['ls', 'plutil', 'grep'], counted: [], columns: [], grepped: ['~/.zprofile'] })
     expect(scopes).toEqual([
       null,
       'text.output.grep',
@@ -144,7 +144,7 @@ describe('Output shapes in an Output block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['wc'], counted: ['*.md'], grepped: [] })
+    expect(plan).toEqual({ language: 'md', shapes: ['wc'], counted: ['*.md'], columns: [1], grepped: [] })
     expect(scopes).toEqual(['text.output.wc', 'text.output.wc', BLOCK, BLOCK, BLOCK])
   })
 
@@ -195,7 +195,7 @@ describe('Output shapes in an Output block', () => {
     const plan = planOutput(unknownCommand, 'src/a.ts:12:const a = 1')
 
     // Assert
-    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS, counted: [], grepped: [] })
+    expect(plan).toEqual({ language: null, shapes: SHAPE_IDS, counted: [], columns: [], grepped: [] })
   })
 })
 
@@ -272,7 +272,7 @@ describe('Output shapes inside a Language block', () => {
     const scopes = assignLines(lines, plan)
 
     // Assert
-    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'], counted: [], grepped: [] })
+    expect(plan).toEqual({ language: 'md', shapes: ['ls', 'grep'], counted: [], columns: [], grepped: [] })
     expect(scopes).toEqual(new Array(42).fill(BLOCK))
   })
 
@@ -470,6 +470,61 @@ test('a date in a Markdown block (2026-11-28) stays Markdown after a grep of a f
   // Assert: stdin (`-`) is no named file
   expect(plan.grepped).toEqual(['2026'])
   expect(scopes).toEqual(['text.output.grep', BLOCK, BLOCK])
+})
+
+test('the context row after a grep hit in a file without an extension (Makefile-4-) keeps the grep colours, so its text opens no comment in the file printed next', () => {
+  // Arrange: grep -A 1 prints the line after the hit as `Makefile-4-`, here opening a block comment
+  const command = 'cat a.ts; grep -Hn -A 1 TODO Makefile; cat b.ts'
+  const lines = ['const a = 1', 'Makefile:3:// TODO', 'Makefile-4-/*', 'const b = 2']
+
+  // Act
+  const scopes = assignLines(lines, planOutput(command, lines.join('\n')))
+
+  // Assert
+  expect(scopes).toEqual([BLOCK, 'text.output.grep', 'text.output.grep', BLOCK])
+})
+
+test('a grep row under the label given to stdin with -H (release notes.ts:3:) keeps the grep colours between two TypeScript files', () => {
+  // Arrange: grep -H prints the label as the file name of the text piped in
+  const command = 'head -n 1 a.ts; cat x.ts | grep -Hn --label="release notes.ts" TODO; cat b.ts'
+  const lines = ['/* licence', 'release notes.ts:3:// TODO', 'const b = 2']
+
+  // Act
+  const plan = planOutput(command, lines.join('\n'))
+  const scopes = assignLines(lines, plan)
+
+  // Assert
+  expect(plan.grepped).toEqual(['release notes.ts'])
+  expect(scopes).toEqual([BLOCK, 'text.output.grep', BLOCK])
+})
+
+test('a label given to stdin without -H names no file, as grep does not print it', () => {
+  // Arrange
+  const command = 'cat intro.md; cat draft.md | grep --label="release notes.md" -v draft; cat guide.md'
+  const lines = ['# Intro', 'release notes.md:3: is a line of the draft', '# Guide']
+
+  // Act
+  const plan = planOutput(command, lines.join('\n'))
+  const scopes = assignLines(lines, plan)
+
+  // Assert
+  expect(plan.grepped).toEqual([])
+  expect(scopes).toEqual([BLOCK, BLOCK, BLOCK])
+})
+
+test('Markdown read from a file given with < (cat - guide.md < intro.md) is coloured as Markdown, and stdin of another Language leaves the block plain', () => {
+  // Arrange
+  const output = '# Intro\n# Guide'
+
+  // Act
+  const sameLanguage = planOutput('cat -- - guide.md < intro.md', output)
+  const onlyStdin = planOutput('cat < intro.md', output)
+  const otherLanguage = planOutput('cat - guide.md < data.json', output)
+
+  // Assert
+  expect(sameLanguage.language).toBe('md')
+  expect(onlyStdin.language).toBe('md')
+  expect(otherLanguage.language).toBe(null)
 })
 
 test('a Markdown line that opens with the grep pattern (release notes:12:) stays Markdown, as the pattern is no file', () => {

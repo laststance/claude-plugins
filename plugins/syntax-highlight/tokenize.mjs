@@ -9,7 +9,7 @@ import { createRequire } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 import { BUNDLED, detectEditor, findGrammars, norm, readJsonc, readText, resolveTheme } from './editors.mjs'
-import { BLOCK, assignLines, countedNameAt, planOutput, readsApart, shapeGrammars, shapeScope } from './outputs.mjs'
+import { BLOCK, assignLines, columnsOf, countedNameAt, planOutput, readsApart, shapeGrammars, shapeScope } from './outputs.mjs'
 import { ASSIGN, WRAPPERS, base, lex } from './shell.mjs'
 
 const require = createRequire(import.meta.url)
@@ -234,6 +234,7 @@ if (input.output !== undefined) {
     for (let c = 0; c < whole.length; c++) styles[start + c] = whole[c]
   }
   const counted = new Set(plan.counted)
+  const columns = columnsOf(plan)
   let offset = 0
   for (let k = 0; k < lines.length;) {
     // a run of lines sharing an Output shape is tokenized as one text with that shape's grammar
@@ -249,7 +250,7 @@ if (input.output !== undefined) {
       // number (`7 2026 notes.md`) keeps the default colour and only the counts before it take theirs
       let start = offset
       for (const line of lines.slice(k, j)) {
-        const name = countedNameAt(line, counted)
+        const name = countedNameAt(line, counted, columns)
         // from the blank space before the name on, as in a row whose name opens with a letter
         if (name !== -1) for (let c = line.slice(0, name).trimEnd().length; c < line.length; c++) styles[start + c] = null
         start += line.length + 1

@@ -983,13 +983,18 @@ test('two drawings of one call with different text (its record before and after 
 })
 
 test('many coloured rows drawn together (a resumed session) run at most four colouring workers at once', { timeoutMs: 30_000 }, async ($, on) => {
-  // Arrange: a worker that takes a real 50 ms and counts how many run at once; 12 command rows and their blocks ask for
-  // 24 colourings
+  // Arrange: a worker that counts how many run at once; 12 command rows and their blocks ask for 24 colourings. The
+  // first workers are held until four run together (however long a row takes to mount), and each worker then stays a
+  // real 50 ms more, in which a fifth would start if nothing held it back. Two seconds end the hold for a pool that
+  // never reaches four, which the count then shows
   let running = 0
   let mostAtOnce = 0
   let served = 0
   let allServed: () => void = () => {}
   const everyColouringServed = new Promise<void>(resolve => (allServed = resolve))
+  let fourRun: () => void = () => {}
+  const fourRunTogether = new Promise<void>(resolve => (fourRun = resolve))
+  setTimeout(() => fourRun(), 2000)
   on('ui.render', ($, e) => {
     const { Text } = $.ui.resolve(e)
 
@@ -998,6 +1003,8 @@ test('many coloured rows drawn together (a resumed session) run at most four col
   on('process.run', async (_, e) => {
     running++
     mostAtOnce = Math.max(mostAtOnce, running)
+    if (running === 4) fourRun()
+    await fourRunTogether
     await new Promise(resolve => setTimeout(() => resolve(undefined), 50))
     running--
     served++

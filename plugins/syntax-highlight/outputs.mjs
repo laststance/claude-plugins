@@ -10,6 +10,8 @@ import { lex, programOf } from './shell.mjs'
  *   resolves to a grammar (`md`, `json`, `diff`), or null when the command names none.
  * @property {string[]} shapes - Ids of the Output shapes the command can print (`ls`, `grep`, ...), in test order.
  * @property {string[]} counted - The files the command gave `wc`, as written (`release notes.md`).
+ * @property {number[]} columns - For each of `counted`, how many counts its `wc` writes in a row (`wc -l`: 1, `wc`: 3),
+ *   or 0 when the flags do not say.
  * @property {string[]} grepped - The files and folders a grep in the command searches, as written (`Makefile`).
  */
 
@@ -235,6 +237,19 @@ const namesOf = program => {
 }
 
 /**
+ * The Language of a segment's stdin: the file a `<` reads (`cat - guide.md < intro.md`), which the shell gives the
+ * program in place of the pipe, else what the stage before it printed. Called by {@link planOutput} and
+ * {@link readsApart} before {@link languageOf}.
+ *
+ * @param seg - One segment from lex.
+ * @param fed - The Language the stage before it in the pipeline printed, or null.
+ * @returns a language id or extension, or null when stdin has no known Language
+ * @example
+ * stdinOf(lex('cat < intro.md')[0], null) // => 'md'
+ */
+const stdinOf = (seg, fed) => (seg.stdin ? extensionOf(seg.stdin.value) : fed)
+
+/**
  * The Language a pipeline stage prints, given what fed it.
  *
  * @param program - The stage's program, from {@link programOf}.
@@ -258,7 +273,9 @@ const languageOf = (program, fed) => {
     return files.length === 0 ? fed : sharedExtension(files)
   }
   if (FILTERS.has(name)) {
-    // a filter given files of its own (`grep -n x a.ts`) prints Output shapes, not the Language
+    // a filter given files of its own (`grep -n x a.ts`) prints Output shapes, not the Language. A grep's files are
+    // told from its patterns as the grep reads them (`grep -v -e draft -e WIP` names none)
+    if (GREP_PROGRAMS.has(name)) return searchedOf(program).every(word => word === '-') ? fed : null
     const plain = fileArgs(args)
     return plain.length <= 1 ? fed : null
   }
@@ -291,17 +308,18 @@ const languageOf = (program, fed) => {
  * @returns the plan
  * @example
  * planOutput('cd refs && cat pitfalls.md records.md', '# Pitfalls')
- * // => { language: 'md', shapes: [] }
+ * // => { language: 'md', shapes: [], counted: [], columns: [], grepped: [] }
  * planOutput('wc -l *.md && cat this-mac.md', '  95 developing.md\n# This Mac')
- * // => { language: 'md', shapes: ['wc'] }
+ * // => { language: 'md', shapes: ['wc'], counted: ['*.md'], columns: [1], grepped: [] }
  */
 export const planOutput = (command, output) => {
   const segments = command.trim() === '' ? [] : lex(command)
-  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [], grepped: [] }
+  if (segments.length === 0) return { language: sniffJson(output), shapes: SHAPE_IDS, counted: [], columns: [], grepped: [] }
 
   const names = new Set()
   const printed = new Set()
   const counted = []
+  const columns = []
   const grepped = []
   let fed = null
   for (const seg of segments) {
@@ -310,11 +328,15 @@ export const planOutput = (command, output) => {
     if (program !== null) {
       for (const name of namesOf(program)) names.add(name)
       // every word of wc's that is no flag and no flag's value is a file it counts
-      if (program.name === 'wc') counted.push(...operandsOf(program.args, WC_VALUE_FLAGS))
+      if (program.name === 'wc') {
+        const files = operandsOf(program.args, WC_VALUE_FLAGS)
+        counted.push(...files)
+        columns.push(...files.map(() => wcColumns(program.args)))
+      }
       // a grep's hits name its files, and the strong form takes no name with a space or without a `.` or `/`
       // (`Makefile`): those the command gave it are known. `-` is stdin, which has no name of its own
-      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => arg !== '' && arg !== '-'))
-      fed = languageOf(program, fed)
+      if (namesOf(program).some(name => GREP_PROGRAMS.has(name))) grepped.push(...searchedOf(program).filter(arg => arg !== '' && arg !== '-'), ...labelOf(program))
+      fed = languageOf(program, stdinOf(seg, fed))
     }
     // the last stage of a pipeline prints; a silent command prints nothing
     if (!isPiped) {
@@ -326,7 +348,7 @@ export const planOutput = (command, output) => {
   const languages = [...printed].filter(lang => lang !== null)
   const language = languages.length === 1 ? languages[0] : languages.length === 0 ? sniffJson(output) : null
   const shapes = SHAPES.filter(shape => shape.programs.some(name => names.has(name))).map(shape => shape.id)
-  return { language, shapes, counted, grepped }
+  return { language, shapes, counted, columns, grepped }
 }
 
 /**
@@ -359,7 +381,7 @@ export const readsApart = command => {
   for (const seg of segments) {
     const program = programOf(seg)
     if (program !== null) {
-      fed = languageOf(program, fed)
+      fed = languageOf(program, stdinOf(seg, fed))
       names.push(...namesOf(program))
       // a grep anywhere in the pipeline that writes a prefix before each row makes the pipeline's rows the grep shape's
       if (namesOf(program).some(name => GREP_PROGRAMS.has(name)) && prefixesRows(program)) isPrefixed = true
@@ -429,6 +451,52 @@ const operandsOf = (args, valueFlags) => {
   return words
 }
 
+/** wc's flags that each add a count to a row, by the letter of the short flag. */
+const WC_COUNT_FLAGS = { '--bytes': 'c', '--chars': 'm', '--lines': 'l', '--words': 'w', '--max-line-length': 'L' }
+
+/**
+ * How many counts a `wc` writes before a file's name: one for each kind its flags ask for, or lines, words and bytes
+ * (3) with none. Tells a row's last count from a name that opens with a number, in {@link countedNameAt}. Called by
+ * {@link planOutput}.
+ *
+ * @param args - wc's words after the program.
+ * @returns the number of counts, or 0 when the flags do not say (`-c` with `-m`: GNU wc writes both, BSD wc one)
+ * @example
+ * wcColumns(['-l', 'a.md']) // => 1
+ * wcColumns(['a.md']) // => 3
+ */
+const wcColumns = args => {
+  const kinds = new Set()
+  for (const arg of args) {
+    if (arg === '--') break
+    if (arg.startsWith('--')) {
+      const kind = WC_COUNT_FLAGS[arg.split('=')[0]]
+      if (kind) kinds.add(kind)
+    } else if (arg.startsWith('-')) for (const letter of arg.slice(1)) if ('clmwL'.includes(letter)) kinds.add(letter)
+  }
+  if (kinds.has('c') && kinds.has('m')) return 0
+  return kinds.size === 0 ? 3 : kinds.size
+}
+
+/**
+ * For each file a plan's `wc` counts, how many counts its rows may hold: a file named to two `wc` runs has two.
+ * Called by {@link assignLines} and by the worker, for {@link countedNameAt}.
+ *
+ * @param plan - From {@link planOutput}; a plan without `columns` (an older hooks module's) gives an empty map.
+ * @returns the numbers of counts by file name; a name missing from it, or with 0 among its numbers, takes any
+ * @example
+ * columnsOf({ language: null, shapes: ['wc'], counted: ['a.md'], columns: [1], grepped: [] }) // => Map { 'a.md' => Set { 1 } }
+ */
+export const columnsOf = plan => {
+  const byName = new Map()
+  for (const [k, name] of (plan.counted ?? []).entries()) {
+    if (plan.columns?.[k] === undefined) continue
+    if (!byName.has(name)) byName.set(name, new Set())
+    byName.get(name).add(plan.columns[k])
+  }
+  return byName
+}
+
 // flags that take a value, by program, those of them that give the pattern (ag has none: its -f follows links), and
 // the flags with which the program writes a file name or a number before each row it prints.
 // A value flag missing here leaves its value among the words, where the first is taken for the pattern and the pattern
@@ -478,10 +546,11 @@ const COUNT_FLAGS = new Set(['-A', '-B', '-C', '-m', '--after-context', '--befor
  *
  * @param program - A grep, rg, ag or git grep program, from programOf.
  * @returns `flags` (each short flag as `-n`, each long one by its name), `words` (neither flags nor their values, in
- *   order), `hasPatternFlag` (a flag gave the pattern, so no word is it) and the program's `table` in {@link GREP_FLAGS}
+ *   order), `hasPatternFlag` (a flag gave the pattern, so no word is it), the program's `table` in {@link GREP_FLAGS}
+ *   and `label` (the value of `--label`, or null)
  * @example
  * grepArgs({ name: 'grep', args: ['-Hn', '-e', 'release notes', 'src/app.ts'] })
- * // => { flags: Set { '-H', '-n', '-e' }, words: ['src/app.ts'], hasPatternFlag: true, table: GREP_FLAGS.grep }
+ * // => { flags: Set { '-H', '-n', '-e' }, words: ['src/app.ts'], hasPatternFlag: true, table: GREP_FLAGS.grep, label: null }
  */
 const grepArgs = program => {
   const table = GREP_FLAGS[program.name === 'rg' || program.name === 'ag' ? program.name : 'grep']
@@ -494,6 +563,7 @@ const grepArgs = program => {
   const flags = new Set()
   const words = []
   let hasPatternFlag = false
+  let label = null
   for (let k = 0; k < args.length; k++) {
     const arg = args[k]
     if (arg === '--') {
@@ -503,6 +573,8 @@ const grepArgs = program => {
     if (arg.startsWith('--')) {
       const flag = arg.split('=')[0]
       flags.add(flag)
+      // the name grep gives stdin, after `=` or as the next word
+      if (flag === '--label') label = arg.includes('=') ? arg.slice(arg.indexOf('=') + 1) : (args[k + 1] ?? null)
       if (table.patterns.includes(flag)) hasPatternFlag = true
       if (takesValue(flag) && !arg.includes('=') && takesNext(flag, args[k + 1])) k++
       continue
@@ -521,7 +593,7 @@ const grepArgs = program => {
     }
     words.push(arg)
   }
-  return { flags, words, hasPatternFlag, table }
+  return { flags, words, hasPatternFlag, table, label }
 }
 
 /**
@@ -537,6 +609,21 @@ const searchedOf = program => {
   const { words, hasPatternFlag } = grepArgs(program)
   // without -e or -f, the first word is the pattern
   return hasPatternFlag ? words : words.slice(1)
+}
+
+/**
+ * The name a grep prints before the rows it read from stdin: the value of `--label`, shown only with -H. Its rows then
+ * name it as a searched file's rows name the file (`release notes.ts:3:`). Called by {@link planOutput}.
+ *
+ * @param program - A grep, rg, ag or git grep program, from programOf.
+ * @returns the label in a list, or an empty list when the grep prints none
+ * @example
+ * labelOf({ name: 'grep', args: ['-Hn', '--label=release notes.ts', 'TODO'] }) // => ['release notes.ts']
+ * labelOf({ name: 'grep', args: ['--label=draft.md', '-v', 'draft'] }) // => []
+ */
+const labelOf = program => {
+  const { flags, label } = grepArgs(program)
+  return label !== null && label !== '' && (flags.has('-H') || flags.has('--with-filename')) ? [label] : []
 }
 
 /**
@@ -583,23 +670,49 @@ const isHitOf = (line, grepped) => {
 }
 
 /**
+ * The path and line number a grep hit names: by the `grep` shape's strong form, else as a hit in a file or folder the
+ * command gave the grep (`Makefile:3:`), which the strong form does not take. Called by {@link adoptContextRows}.
+ *
+ * @param line - A line with the `grep` scope.
+ * @param grepped - The names the command gave a grep, from {@link planOutput}.
+ * @returns `{ path, number }`, or null for a row that is no hit (a context row)
+ * @example
+ * hitOf('Makefile:3:TODO', new Set(['Makefile'])) // => { path: 'Makefile', number: 3 }
+ */
+const hitOf = (line, grepped) => {
+  const strong = SHAPE_BY_ID.get('grep').strong.exec(line)
+  if (strong !== null) return { path: strong[1], number: Number(strong[2]) }
+  for (const name of grepped) {
+    if (!line.startsWith(name)) continue
+    // the name itself, or a path under the named folder, then `:12:`
+    const hit = /^(\/[^:\n]*)?:(\d+):/.exec(line.slice(name.length))
+    if (hit !== null) return { path: name + (hit[1] ?? ''), number: Number(hit[2]) }
+  }
+  return null
+}
+
+/**
  * Where the name starts in wc's row for a file the command gave it: counts, then that file's name as written.
  *
  * GNU wc writes a lone file's count unpadded (`7 release notes.md`), which the `wc` shape's strong form does not take
  * when the name has a space or no `.` or `/` (prose looks the same). The command naming the file tells them apart.
  * The name is matched at the line's end, so one that opens with a number (`7 2026 notes.md`) is found too, and of two
- * names that fit, the longer is the file's. Each check reads the line once. Called by {@link assignLines} (through
- * {@link isCountOf}) and by the worker, which draws the name in the default colour.
+ * names that fit, the longer is the file's. A name fits only with as many counts before it as its `wc` writes, so in
+ * `wc -l "2026 report.md"; wc report.md` the row `7 30 2026 report.md` is `report.md`'s, its last count 2026. Each
+ * check reads the line once. Called by {@link assignLines} (through {@link isCountOf}) and by the worker, which draws
+ * the name in the default colour.
  *
  * @param line - A line of the block.
  * @param counted - The files the command gave `wc`, from {@link planOutput}.
+ * @param columns - From {@link columnsOf}: the numbers of counts each file's rows may hold. Empty takes any.
  * @returns the index of the name's first character, or -1 when the line counts none of those files
  * @example
  * countedNameAt('7 release notes.md', new Set(['release notes.md'])) // => 2
  * countedNameAt('7 2026 notes.md', new Set(['2026 notes.md'])) // => 2
  * countedNameAt('7 release notes', new Set(['release notes.md'])) // => -1
+ * countedNameAt('7 30 2026 report.md', new Set(['2026 report.md', 'report.md']), new Map([['2026 report.md', new Set([1])], ['report.md', new Set([3])]])) // => 10
  */
-export const countedNameAt = (line, counted) => {
+export const countedNameAt = (line, counted, columns = new Map()) => {
   // a row that does not open with a count is no wc row, whatever names follow
   if (!/^\s*\d/.test(line)) return -1
   let at = -1
@@ -607,13 +720,17 @@ export const countedNameAt = (line, counted) => {
     if (!line.endsWith(name)) continue
     const counts = line.slice(0, line.length - name.length)
     // before the name: digits and spaces only, at least one count, and a space before the name
-    if (/\s$/.test(counts) && /\d/.test(counts) && !/[^\d\s]/.test(counts) && (at === -1 || counts.length < at)) at = counts.length
+    if (!/\s$/.test(counts) || !/\d/.test(counts) || /[^\d\s]/.test(counts)) continue
+    // as many counts as the file's wc writes, when the command says how many
+    const allowed = columns.get(name)
+    if (allowed !== undefined && !allowed.has(0) && !allowed.has(counts.trim().split(/\s+/).length)) continue
+    if (at === -1 || counts.length < at) at = counts.length
   }
   return at
 }
 
 /** Whether a line is wc's row for a file the command gave it, by {@link countedNameAt}. Called by {@link assignLines}. */
-const isCountOf = (line, counted) => countedNameAt(line, counted) !== -1
+const isCountOf = (line, counted, columns) => countedNameAt(line, counted, columns) !== -1
 
 /** The characters a regex `.` stops at inside a line (`\n` splits the lines before any test). */
 const DOT_STOPS = ['\r', ' ', ' ']
@@ -652,22 +769,22 @@ const isNameUnbroken = line => {
  *
  * @param lines - The block's lines.
  * @param scopes - What {@link assignLines} gave each line so far; the context rows found are set to the `grep` scope.
+ * @param grepped - The names the command gave a grep, whose hits {@link hitOf} reads too.
  * @example
  * const scopes = ['text.output.grep', 'block']
- * adoptContextRows(['src/a.ts:12:const a = 1', 'src/a.ts-13-/*'], scopes) // scopes[1] => 'text.output.grep'
+ * adoptContextRows(['src/a.ts:12:const a = 1', 'src/a.ts-13-/*'], scopes, new Set()) // scopes[1] => 'text.output.grep'
  */
-const adoptContextRows = (lines, scopes) => {
+const adoptContextRows = (lines, scopes, grepped) => {
   const grep = shapeScope('grep')
-  const { strong } = SHAPE_BY_ID.get('grep')
   // forwards for the rows after a hit (-A), backwards for the rows before it (-B)
   for (const step of [1, -1]) {
     let path = null
     let number = 0
     for (let k = step === 1 ? 0 : lines.length - 1; k >= 0 && k < lines.length; k += step) {
-      const hit = scopes[k] === grep ? strong.exec(lines[k]) : null
+      const hit = scopes[k] === grep ? hitOf(lines[k], grepped) : null
       if (hit !== null) {
-        path = hit[1]
-        number = Number(hit[2])
+        path = hit.path
+        number = hit.number
       } else if (path !== null && lines[k].startsWith(`${path}-${number + step}-`)) {
         // a context row: the same file, the next line in this direction
         scopes[k] = grep
@@ -699,19 +816,20 @@ export const assignLines = (lines, plan) => {
   // with a Language, only rows nothing but the command prints take a shape; prose stays in the Language
   const isStrongOnly = plan.language !== null
   const counted = new Set(plan.counted ?? [])
+  const columns = columnsOf(plan)
   const grepped = new Set(plan.grepped ?? [])
   const scopes = lines.map(line => {
     const shape = shapes.find(s => {
       // a wc row's name holds no character a regex `.` stops at
       if (s.id === 'wc' && !isNameUnbroken(line)) return false
-      if (s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted)) || (s.id === 'grep' && isHitOf(line, grepped))) return true
+      if (s.strong.test(line) || (s.id === 'wc' && isCountOf(line, counted, columns)) || (s.id === 'grep' && isHitOf(line, grepped))) return true
       return !isStrongOnly && s.weak !== null && s.weak.test(line)
     })
     if (shape) return shapeScope(shape.id)
     return plan.language === null ? null : BLOCK
   })
   // a grep's context rows read like prose, so with a Language only the hit beside them tells them
-  if (isStrongOnly && shapes.some(s => s.id === 'grep')) adoptContextRows(lines, scopes)
+  if (isStrongOnly && shapes.some(s => s.id === 'grep')) adoptContextRows(lines, scopes, grepped)
   return scopes
 }
 

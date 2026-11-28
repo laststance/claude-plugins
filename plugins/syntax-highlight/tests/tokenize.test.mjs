@@ -211,6 +211,31 @@ test('Markdown piped through a grep that writes no prefix, between two other fil
   assert.equal(why.b, true)
 })
 
+test('Markdown piped through a grep with two -e patterns keeps a fenced example holding a grep hit whole', () => {
+  // Arrange: the values of -e are patterns, not files, so the grep filters the Markdown piped in
+  const output = ['# Guide', '', '```sh', 'src/a.ts:12:const a = 1', '```', '', '**Why:** bold here'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'cat intro.md; cat draft.md | grep -v -e draft -e WIP; cat guide.md')
+
+  // Assert: `**Why:**` is bold Markdown, not the fence's code
+  const why = lines[6][0]
+  assert.equal(why.t, '**Why:**')
+  assert.equal(why.b, true)
+})
+
+test('a wc row with three counts keeps its last count (2026) coloured when another wc in the command counted a file named 2026 report.md', () => {
+  // Arrange: `wc -l` writes one count before `2026 report.md`; plain `wc` writes three before `report.md`, the last 2026 bytes
+  const output = ['7 2026 report.md', '7 30 2026 report.md'].join('\n')
+
+  // Act
+  const lines = colourOutput(output, 'wc -l "2026 report.md"; wc report.md')
+
+  // Assert
+  assert.deepEqual(lines[0].map(run => [run.t, run.fg]), [['7', '#b5cea8'], [' 2026 report.md', null]])
+  assert.deepEqual(lines[1].map(run => [run.t, run.fg]), [['7 30 2026', '#b5cea8'], [' report.md', null]])
+})
+
 test('Markdown piped through a grep given only a label for stdin (no -H) keeps a fenced example holding a grep hit whole', () => {
   // Arrange: grep prints the label only with -H, so its rows are the file's lines as they are
   const output = ['# Guide', '', '```sh', 'src/a.ts:12:const a = 1', '```', '', '**Why:** bold here'].join('\n')
